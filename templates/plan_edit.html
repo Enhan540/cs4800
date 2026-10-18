@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ plan.title }} | Meetwise{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">← Back to {{ plan.title }}</a>
+<section class="narrow-page with-back-link"><p class="eyebrow">{{ group.name }}</p><h1>Edit plan</h1>
+  <section class="card"><form method="post">
+    <label for="title">Plan title<input id="title" name="title" required maxlength="120" value="{{ form.get('title', '') }}"></label>
+    <div class="form-grid"><label for="start_date">Start date<input id="start_date" name="start_date" type="date" required value="{{ form.get('start_date', '') }}"></label><label for="end_date">End date<input id="end_date" name="end_date" type="date" required value="{{ form.get('end_date', '') }}"></label></div>
+    <div class="form-grid"><label for="duration_minutes">Duration in minutes<input id="duration_minutes" name="duration_minutes" type="number" min="1" required value="{{ form.get('duration_minutes', '') }}"></label><label for="minimum_attendance">Minimum attendance<input id="minimum_attendance" name="minimum_attendance" type="number" min="1" max="{{ group.member_ids|length }}" required value="{{ form.get('minimum_attendance', '') }}"></label></div>
+    <div class="form-grid"><label for="earliest_time">Earliest allowed time <span class="optional">optional</span><input id="earliest_time" name="earliest_time" type="time" value="{{ form.get('earliest_time') or '' }}"></label><label for="latest_time">Latest allowed time <span class="optional">optional</span><input id="latest_time" name="latest_time" type="time" value="{{ form.get('latest_time') or '' }}"></label></div>
+    {% if plan.status == 'scheduled' %}<div class="result-notice"><strong>Scheduling requirements affect the selected time.</strong><span>Changing dates, duration, attendance, or allowed times will return this plan to planning.</span></div>{% endif %}
+    <div class="button-row"><button class="button" type="submit">Save changes</button><a class="button secondary" href="{{ url_for('plan_detail', plan_id=plan._id) }}">Cancel</a></div>
+  </form></section>
+</section>
+{% endblock %}

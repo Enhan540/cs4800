@@ -109,6 +109,54 @@ def create_app(database_override=None):
             "status": "available",
         }, None
 
+    def validate_plan_form(form, group_size):
+        values = {
+            "title": form.get("title", "").strip(),
+            "start_date": form.get("start_date", "").strip(),
+            "end_date": form.get("end_date", "").strip(),
+            "earliest_time": form.get("earliest_time", "").strip() or None,
+            "latest_time": form.get("latest_time", "").strip() or None,
+        }
+        errors = []
+        try:
+            values["duration_minutes"] = int(form.get("duration_minutes", "0"))
+            values["minimum_attendance"] = int(form.get("minimum_attendance", "0"))
+        except (TypeError, ValueError):
+            values["duration_minutes"] = 0
+            values["minimum_attendance"] = 0
+
+        try:
+            parsed_start = parse_date(values["start_date"])
+            parsed_end = parse_date(values["end_date"])
+            if parsed_end < parsed_start:
+                errors.append("End date must be on or after the start date.")
+            if (parsed_end - parsed_start).days > 366:
+                errors.append("Date range must be one year or less.")
+        except (TypeError, ValueError):
+            errors.append("Please enter a valid date range.")
+        if not values["title"]:
+            errors.append("Plan title is required.")
+        if values["duration_minutes"] <= 0:
+            errors.append("Meeting duration must be greater than zero.")
+        if values["minimum_attendance"] < 1:
+            errors.append("Minimum attendance must be at least one.")
+        if values["minimum_attendance"] > group_size:
+            errors.append("Minimum attendance cannot exceed the group size.")
+        try:
+            if values["earliest_time"]:
+                parse_time(values["earliest_time"])
+            if values["latest_time"]:
+                parse_time(values["latest_time"])
+            if (
+                values["earliest_time"]
+                and values["latest_time"]
+                and parse_time(values["latest_time"]) <= parse_time(values["earliest_time"])
+            ):
+                errors.append("Latest allowed time must be later than earliest allowed time.")
+        except ValueError:
+            errors.append("Please enter valid allowed times.")
+        return values, errors
+
     @app.template_filter("time12")
     def time12(value):
         if not value:
@@ -128,6 +176,22 @@ def create_app(database_override=None):
         if remaining or not parts:
             parts.append(f"{remaining} min")
         return " ".join(parts)
+
+    @app.template_filter("date_long")
+    def date_long(value):
+        if not value:
+            return "—"
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        return value.strftime("%A, %B %-d, %Y") if os.name != "nt" else value.strftime("%A, %B %#d, %Y")
+
+    @app.template_filter("datetime_time12")
+    def datetime_time12(value):
+        if not value:
+            return "—"
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        return value.strftime("%I:%M %p").lstrip("0")
 
     @app.get("/")
     def index():
@@ -239,14 +303,23 @@ def create_app(database_override=None):
         group = get_group(group_id)
         member_ids = group.get("member_ids", [])
         members = list(db.users.find({"_id": {"$in": member_ids}}).sort("display_name", ASCENDING))
-        member_map = {member["_id"]: member for member in members}
         entries = list(
             db.availability.find({"user_id": {"$in": member_ids}}).sort(
                 [("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
         )
+        availability_by_member = {
+            member["_id"]: {day: [] for day in DAYS}
+            for member in members
+        }
         for entry in entries:
-            entry["member"] = member_map.get(entry["user_id"])
+            member_days = availability_by_member.get(entry.get("user_id"))
+            if member_days is not None and entry.get("day") in member_days:
+                member_days[entry["day"]].append(entry)
+        availability_rows = [
+            {"member": member, "days": availability_by_member[member["_id"]]}
+            for member in members
+        ]
         available_users = list(
             db.users.find({"_id": {"$nin": member_ids}}).sort("display_name", ASCENDING)
         )
@@ -256,7 +329,8 @@ def create_app(database_override=None):
             group=group,
             members=members,
             available_users=available_users,
-            entries=entries,
+            availability_days=DAYS,
+            availability_rows=availability_rows,
             plans=plans,
         )
 
@@ -337,66 +411,19 @@ def create_app(database_override=None):
         group = get_group(group_id)
         group_size = len(group.get("member_ids", []))
         if request.method == "POST":
-            title = request.form.get("title", "").strip()
-            start_date = request.form.get("start_date", "").strip()
-            end_date = request.form.get("end_date", "").strip()
-            earliest_time = request.form.get("earliest_time", "").strip() or None
-            latest_time = request.form.get("latest_time", "").strip() or None
-            errors = []
-            try:
-                duration_minutes = int(request.form.get("duration_minutes", "0"))
-                minimum_attendance = int(request.form.get("minimum_attendance", "0"))
-            except ValueError:
-                duration_minutes = 0
-                minimum_attendance = 0
-
-            try:
-                parsed_start = parse_date(start_date)
-                parsed_end = parse_date(end_date)
-                if parsed_end < parsed_start:
-                    errors.append("End date must be on or after the start date.")
-                if (parsed_end - parsed_start).days > 366:
-                    errors.append("Date range must be one year or less.")
-            except ValueError:
-                errors.append("Please enter a valid date range.")
-            if not title:
-                errors.append("Plan title is required.")
-            if duration_minutes <= 0:
-                errors.append("Meeting duration must be greater than zero.")
-            if minimum_attendance < 1:
-                errors.append("Minimum attendance must be at least one.")
-            if minimum_attendance > group_size:
-                errors.append("Minimum attendance cannot exceed the group size.")
-            try:
-                if earliest_time:
-                    parse_time(earliest_time)
-                if latest_time:
-                    parse_time(latest_time)
-                if earliest_time and latest_time and parse_time(latest_time) <= parse_time(earliest_time):
-                    errors.append("Latest allowed time must be later than earliest allowed time.")
-            except ValueError:
-                errors.append("Please enter valid allowed times.")
-
+            values, errors = validate_plan_form(request.form, group_size)
             if errors:
                 for error in errors:
                     flash(error, "error")
                 return render_template("plan_create.html", group=group, form=request.form), 400
 
-            result = db.plans.insert_one(
-                {
-                    "group_id": group["_id"],
-                    "title": title,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "duration_minutes": duration_minutes,
-                    "earliest_time": earliest_time,
-                    "latest_time": latest_time,
-                    "minimum_attendance": minimum_attendance,
-                    "status": "planning",
-                    "matches": [],
-                    "created_at": utc_now(),
-                }
-            )
+            values.update({
+                "group_id": group["_id"],
+                "status": "planning",
+                "matches": [],
+                "created_at": utc_now(),
+            })
+            result = db.plans.insert_one(values)
             flash("Plan created. Run the time finder to calculate matches.", "success")
             return redirect(url_for("plan_detail", plan_id=result.inserted_id))
         return render_template("plan_create.html", group=group)
@@ -411,6 +438,100 @@ def create_app(database_override=None):
         members = list(db.users.find({"_id": {"$in": group.get("member_ids", [])}}))
         member_map = {str(member["_id"]): member for member in members}
         return render_template("plan_detail.html", plan=plan, group=group, member_map=member_map)
+
+    @app.route("/plans/<plan_id>/edit", methods=["GET", "POST"])
+    def edit_plan(plan_id):
+        db = require_database()
+        plan = get_plan(plan_id)
+        group = db.groups.find_one({"_id": plan["group_id"]})
+        if not group:
+            abort(404)
+
+        if request.method == "POST":
+            values, errors = validate_plan_form(request.form, len(group.get("member_ids", [])))
+            if errors:
+                for error in errors:
+                    flash(error, "error")
+                return render_template("plan_edit.html", plan=plan, group=group, form=request.form), 400
+
+            scheduling_fields = (
+                "start_date", "end_date", "duration_minutes", "minimum_attendance",
+                "earliest_time", "latest_time",
+            )
+            constraints_changed = any(plan.get(field) != values[field] for field in scheduling_fields)
+            update = {"$set": values}
+            if constraints_changed:
+                update["$set"].update({"status": "planning", "matches": []})
+                update["$unset"] = {
+                    "match_type": "",
+                    "matches_generated_at": "",
+                    "scheduled_start": "",
+                    "scheduled_end": "",
+                    "scheduled_available_member_ids": "",
+                    "scheduled_attendance_count": "",
+                    "scheduled_total_members": "",
+                    "scheduled_is_shorter": "",
+                    "scheduled_available_duration_minutes": "",
+                }
+            db.plans.update_one({"_id": plan["_id"]}, update)
+            if constraints_changed:
+                flash("Plan updated. Scheduling requirements changed, so select a new time.", "success")
+            else:
+                flash("Plan updated successfully.", "success")
+            return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+
+        return render_template("plan_edit.html", plan=plan, group=group, form=plan)
+
+    @app.post("/plans/<plan_id>/schedule")
+    def schedule_plan(plan_id):
+        db = require_database()
+        plan = get_plan(plan_id)
+        try:
+            match_index = int(request.form.get("match_index", ""))
+            if match_index < 0:
+                raise IndexError
+            match = plan.get("matches", [])[match_index]
+        except (TypeError, ValueError, IndexError):
+            abort(404)
+
+        is_exact = match.get("is_exact", True)
+        if not is_exact and request.form.get("confirm_shorter") != "yes":
+            flash("Confirm the shorter duration before scheduling this option.", "error")
+            return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+
+        try:
+            scheduled_start = datetime.fromisoformat(f"{match['date']}T{match['start_time']}")
+            scheduled_end = datetime.fromisoformat(f"{match['date']}T{match['end_time']}")
+        except (KeyError, ValueError):
+            abort(404)
+
+        available_member_ids = []
+        for member_id in match.get("available_member_ids", []):
+            try:
+                available_member_ids.append(ObjectId(member_id))
+            except (InvalidId, TypeError):
+                continue
+
+        db.plans.update_one(
+            {"_id": plan["_id"]},
+            {"$set": {
+                "status": "scheduled",
+                "scheduled_start": scheduled_start,
+                "scheduled_end": scheduled_end,
+                "scheduled_available_member_ids": available_member_ids,
+                "scheduled_attendance_count": match.get("attendance_count", len(available_member_ids)),
+                "scheduled_total_members": match.get("total_members", len(available_member_ids)),
+                "scheduled_is_shorter": not is_exact,
+                "scheduled_available_duration_minutes": match.get(
+                    "available_duration_minutes", plan["duration_minutes"]
+                ),
+            }},
+        )
+        date_text = scheduled_start.strftime("%A, %B %d").replace(" 0", " ")
+        start_text = scheduled_start.strftime("%I:%M %p").lstrip("0")
+        end_text = scheduled_end.strftime("%I:%M %p").lstrip("0")
+        flash(f"Plan scheduled for {date_text}, {start_text} - {end_text}.", "success")
+        return redirect(url_for("plan_detail", plan_id=plan["_id"]))
 
     @app.post("/plans/<plan_id>/delete")
     def delete_plan(plan_id):

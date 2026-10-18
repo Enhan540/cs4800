@@ -6,12 +6,13 @@ Meetwise is a deployable first MVP for recurring group scheduling. It lets users
 
 - Persistent `users`, `groups`, `availability`, and `plans` MongoDB collections
 - Reusable members with optional email addresses
-- Groups with member lists and a combined availability table
+- Groups with compact member management and a responsive weekly availability matrix
 - Multiple recurring availability windows per member and day
 - Add, edit, and delete availability
 - Plans with any positive whole-minute duration, date range, allowed time range, and minimum attendance
 - A separate scheduling service that searches start times in 30-minute increments while preserving arbitrary durations
 - Ranked exact matches, or clearly labeled shorter alternatives when no full-duration match exists
+- Plan editing, one-click scheduling from ranked results, and a persistent scheduled-time summary
 - Safe POST-only deletion for plans and groups; group deletion preserves reusable members and availability
 - Group-aware member creation that automatically adds a new reusable member to the originating group
 - Flask validation, flash messages, and 404/500/503 pages
@@ -80,12 +81,12 @@ The tests cover arbitrary 45/75/125/180-minute durations, shorter alternatives, 
 2. Open each member and save recurring weekly availability.
 3. Create **Friday Friends** from **Groups**.
 4. Add all three members to the group.
-5. Confirm the group availability table lists their windows.
+5. Confirm the group weekly matrix lists their windows by member and weekday.
 6. Create a plan called **Movie Night** inside the group.
 7. Choose an inclusive date range, a 120-minute duration, and minimum attendance of two or three.
 8. Open the plan and select **Find matching times**.
-9. Review the ranked results and attendance details.
-10. Refresh or restart Flask to confirm MongoDB persistence.
+9. Review the ranked results and attendance details, then schedule one result.
+10. Confirm the scheduled summary remains after refreshing or restarting Flask.
 
 ## Project structure
 
@@ -117,4 +118,4 @@ Create `.env` directly on EC2 and configure the `cs4800-availability` systemd se
 - `EC2_SSH_KEY`
 - `EC2_APP_PATH`
 
-Pushes and pull requests to `main` run pytest. A push to `main` deploys only after tests pass, then installs requirements and restarts the existing systemd service.
+Pushes and pull requests to `main` run pytest. EC2 deployment is currently manual-only through GitHub Actions; a manual run waits for tests to pass, then installs requirements and restarts the existing systemd service.
