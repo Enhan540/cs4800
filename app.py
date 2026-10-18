@@ -222,7 +222,11 @@ def create_app(database_override=None):
             return False
         now = utc_now()
         if scheduled_end.tzinfo is None:
-            scheduled_end = scheduled_end.replace(tzinfo=app_timezone)
+            # PyMongo returns BSON datetimes as naive UTC values by default.
+            # Normalize them before comparing with the app's aware UTC clock.
+            scheduled_end = scheduled_end.replace(tzinfo=timezone.utc)
+        else:
+            scheduled_end = scheduled_end.astimezone(timezone.utc)
         return scheduled_end >= now
 
     def plan_member_ids(plan, group):
