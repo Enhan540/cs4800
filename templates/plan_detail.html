@@ -6,10 +6,48 @@
   <div><p class="eyebrow">{{ group.name }} · {{ plan.status|title }}</p><h1>{{ plan.title }}</h1><p class="muted">{{ plan.start_date }} through {{ plan.end_date }}</p></div>
   <div class="button-row heading-actions">
     <a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Edit Plan</a>
-    <form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}"><button class="button" type="submit">{% if plan.status == 'scheduled' %}Reschedule{% else %}Find Matching Times{% endif %}</button></form>
+    <form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}" {% if plan.status == 'scheduled' %}data-confirm="Rescheduling clears the selected time and existing RSVPs. Continue?"{% endif %}><button class="button" type="submit">{% if plan.status == 'scheduled' %}Reschedule{% else %}Find Matching Times{% endif %}</button></form>
     <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this plan and its saved results?"><button class="button danger" type="submit">Delete Plan</button></form>
   </div>
 </section>
+
+{% if plan.status == 'scheduled' and plan.scheduled_start and plan.scheduled_end %}
+  <section class="content-section rsvp-section">
+    <div class="section-heading"><div><h2>Attendance</h2><p class="muted small section-subtitle">Members can update their RSVP at any time.</p></div><strong class="attendance-total">{{ rsvp.counts.overall_attending }}/{{ rsvp.rows|length }} attending</strong></div>
+    <div class="rsvp-counts" aria-label="RSVP counts">
+      <span>{{ rsvp.counts.attending }} Attending</span><span>{{ rsvp.counts.arriving_late }} Arriving Late</span><span>{{ rsvp.counts.leaving_early }} Leaving Early</span><span>{{ rsvp.counts.not_attending }} Not Attending</span><span>{{ rsvp.counts.no_response }} No Response</span>
+    </div>
+    {% if rsvp.rows %}
+      <div class="rsvp-list">
+        {% for row in rsvp.rows %}
+          <article class="card rsvp-row">
+            <div class="rsvp-member">
+              <strong>{{ row.member.display_name }}</strong>
+              <span class="rsvp-status status-{{ row.status }}">
+                {% if row.status == 'attending' %}✓ Attending
+                {% elif row.status == 'not_attending' %}✕ Not Attending
+                {% elif row.status == 'arriving_late' %}◷ Arriving at {{ row.time|time12 }}
+                {% elif row.status == 'leaving_early' %}◷ Leaving at {{ row.time|time12 }}
+                {% else %}— No Response{% endif %}
+              </span>
+            </div>
+            <form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form>
+              <input type="hidden" name="member_id" value="{{ row.member._id }}">
+              <label>Response<select name="status" required data-rsvp-status>
+                <option value="attending" {% if row.status == 'attending' %}selected{% endif %}>Attending</option>
+                <option value="not_attending" {% if row.status == 'not_attending' %}selected{% endif %}>Not Attending</option>
+                <option value="arriving_late" {% if row.status == 'arriving_late' %}selected{% endif %}>Arriving Late</option>
+                <option value="leaving_early" {% if row.status == 'leaving_early' %}selected{% endif %}>Leaving Early</option>
+              </select></label>
+              <label class="rsvp-time-field" data-rsvp-time-field>Arrival/departure time<input name="response_time" type="time" value="{{ row.time or '' }}" min="{{ plan.scheduled_start.strftime('%H:%M') }}" max="{{ plan.scheduled_end.strftime('%H:%M') }}" data-rsvp-time></label>
+              <button class="button secondary" type="submit">Save RSVP</button>
+            </form>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}<div class="card empty-state compact"><p>Add members to the group to collect RSVPs.</p></div>{% endif %}
+  </section>
+{% endif %}
 
 {% if plan.status == 'scheduled' and plan.scheduled_start and plan.scheduled_end %}
   <section class="scheduled-summary card">
@@ -26,7 +64,7 @@
   <div><strong>{{ plan.duration_minutes }}</strong><span>Requested minutes</span></div><div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div><div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div><div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
 </section>
 
-<section class="content-section"><div class="section-heading"><h2>{% if plan.match_type == 'alternative' %}Closest available options{% else %}Ranked matches{% endif %}</h2>{% if plan.matches_generated_at %}<span class="muted small">Last calculated {{ plan.matches_generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}</div>
+<section class="content-section"><div class="section-heading"><h2>{% if plan.match_type == 'alternative' %}Closest Available Options{% else %}Best Times{% endif %}</h2>{% if plan.matches_generated_at %}<span class="muted small">Automatically calculated {{ plan.matches_generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}</div>
   {% if plan.match_type == 'alternative' %}<div class="result-notice"><strong>No {{ plan.duration_minutes|duration_label }} time window was found.</strong><span>The shorter options below still meet the minimum attendance requirement.</span></div>{% endif %}
   {% if plan.matches %}
     <div class="match-list">
@@ -46,6 +84,6 @@
       {% endfor %}
     </div>
   {% elif plan.matches_generated_at %}<div class="card empty-state"><h2>No matching times were found</h2><p>The minimum attendance requirement could not be met. Try changing the plan or adding more availability.</p></div>
-  {% else %}<div class="card empty-state"><h2>Ready to search</h2><p>Run the time finder to calculate the best overlaps for this group.</p></div>{% endif %}
+  {% else %}<div class="card empty-state"><h2>No options yet</h2><p>Add availability or adjust the plan requirements to find a matching time.</p></div>{% endif %}
 </section>
 {% endblock %}

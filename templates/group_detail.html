@@ -5,6 +5,7 @@
 <section class="page-heading with-back-link">
   <div><p class="eyebrow">Group</p><h1>{{ group.name }}</h1><p class="muted">{{ group.description or 'No description added.' }}</p></div>
   <div class="button-row heading-actions">
+    <a class="button secondary" href="{{ url_for('edit_group', group_id=group._id) }}">Edit Group</a>
     <a class="button" href="{{ url_for('create_plan', group_id=group._id) }}">Create plan</a>
     <form method="post" action="{{ url_for('delete_group', group_id=group._id) }}" data-confirm="Delete this group and all of its plans? Members and their availability will be kept."><button class="button danger" type="submit">Delete group</button></form>
   </div>
@@ -62,7 +63,38 @@
 </section>
 
 <section class="content-section">
-  <div class="section-heading"><h2>Plans</h2><a href="{{ url_for('create_plan', group_id=group._id) }}">Create plan</a></div>
-  {% if plans %}<div class="item-list card">{% for plan in plans %}<a class="list-item" href="{{ url_for('plan_detail', plan_id=plan._id) }}"><span><strong>{{ plan.title }}</strong><small>{{ plan.start_date }} to {{ plan.end_date }} · {{ plan.status|title }}</small></span><span>Open →</span></a>{% endfor %}</div>{% else %}<p class="muted">No plans yet.</p>{% endif %}
+  <div class="section-heading"><div><h2>Scheduled Plans</h2><p class="muted small section-subtitle">Confirmed times for this group.</p></div></div>
+  {% if scheduled_plans %}
+    <div class="plan-card-grid">
+      {% for plan in scheduled_plans %}
+        <article class="card lifecycle-card scheduled-plan-card">
+          <span class="lifecycle-label scheduled-label">Scheduled</span>
+          <h3>{{ plan.title }}</h3>
+          <p class="plan-card-date">{{ plan.scheduled_start|date_short }}</p>
+          <p class="plan-card-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }}</p>
+          <p class="muted small">{{ plan.rsvp_summary.counts.overall_attending }} attending · {{ plan.rsvp_summary.counts.pending }} pending</p>
+          <a class="text-link standalone-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">View Plan →</a>
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}<div class="card empty-state compact"><p>No scheduled plans yet.</p></div>{% endif %}
+</section>
+
+<section class="content-section">
+  <div class="section-heading"><div><h2>Planning</h2><p class="muted small section-subtitle">Plans that still need a time selected.</p></div><a href="{{ url_for('create_plan', group_id=group._id) }}">Create plan</a></div>
+  {% if planning_plans %}
+    <div class="plan-card-grid">
+      {% for plan in planning_plans %}
+        <article class="card lifecycle-card planning-plan-card">
+          <span class="lifecycle-label">Planning</span>
+          <h3>{{ plan.title }}</h3>
+          <p class="plan-card-date">{{ plan.start_date|plan_date }} – {{ plan.end_date|plan_date }}</p>
+          <p class="muted">{{ plan.duration_minutes|duration_label }} · Minimum {{ plan.minimum_attendance }} attendees</p>
+          {% if plan.matches %}<p class="best-match"><strong>Best match:</strong><span>{{ plan.matches[0].day[:3] }} {{ plan.matches[0].start_time|time12 }} · {{ plan.matches[0].attendance_count }}/{{ plan.matches[0].total_members }} available</span></p>{% else %}<p class="best-match muted">Open the plan to calculate current matches.</p>{% endif %}
+          <a class="text-link standalone-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">Continue Planning →</a>
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}<div class="card empty-state compact"><p>No plans currently need scheduling.</p></div>{% endif %}
 </section>
 {% endblock %}
