@@ -1,7 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Members | Meetwise{% endblock %}
+{% block title %}Members | Group Planner{% endblock %}
 {% block content %}
-<section class="page-heading"><div><p class="eyebrow">People</p><h1>{% if origin_group %}Create a member for {{ origin_group.name }}{% else %}Members{% endif %}</h1><p class="muted">Members are global and can be reused across multiple groups.{% if origin_group %} This member will be added to {{ origin_group.name }} automatically.{% endif %}</p></div>{% if origin_group %}<a class="button secondary" href="{{ url_for('group_detail', group_id=origin_group._id) }}">Back to group</a>{% endif %}</section>
+<a class="back-link" href="{{ url_for('group_detail', group_id=origin_group._id) if origin_group else url_for('index') }}">← Back to {{ origin_group.name if origin_group else 'Dashboard' }}</a>
+<section class="page-heading with-back-link"><div><p class="eyebrow">People</p><h1>{% if origin_group %}Create a member for {{ origin_group.name }}{% else %}Members{% endif %}</h1><p class="muted">Members are global and can be reused across multiple groups.{% if origin_group %} This member will be added to {{ origin_group.name }} automatically.{% endif %}</p></div></section>
 <div class="two-column">
   <section class="card">
     <h2>Add a member</h2>
@@ -17,7 +18,7 @@
     {% if users %}
       <div class="item-list">
         {% for user in users %}
-          <a class="list-item" href="{{ url_for('member_availability', user_id=user._id) }}">
+          <a class="list-item" href="{{ url_for('member_availability', user_id=user._id, return_to=url_for('group_detail', group_id=origin_group._id) if origin_group else url_for('users')) }}">
             <span><strong>{{ user.display_name }}</strong><small>{{ user.email or 'No email added' }}</small></span><span>Availability →</span>
           </a>
         {% endfor %}

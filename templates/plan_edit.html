@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Edit {{ plan.title }} | Meetwise{% endblock %}
+{% block title %}Edit {{ plan.title }} | Group Planner{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">← Back to {{ plan.title }}</a>
 <section class="narrow-page with-back-link"><p class="eyebrow">{{ group.name }}</p><h1>Edit plan</h1>

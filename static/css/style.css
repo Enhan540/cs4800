@@ -6,6 +6,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 a { color: #2854ba; }
 .container { width: min(100% - 2rem, 1040px); margin: 0 auto; }
 .site-header { background: #172033; color: white; }
@@ -83,6 +84,26 @@ tr:last-child td { border-bottom: 0; }
 .empty-state.compact { padding: 1.5rem; }
 .availability-list, .match-list { display: grid; gap: .85rem; }
 .availability-row { display: flex; align-items: end; gap: .8rem; padding: 1rem; }
+.availability-editor { padding: clamp(1.2rem, 3vw, 1.8rem); }
+.weekday-tabs { display: flex; gap: .35rem; overflow-x: auto; border-bottom: 1px solid #dfe5ee; padding-bottom: .75rem; }
+.weekday-tab { flex: 1 0 4.25rem; border: 0; border-radius: 8px; background: transparent; color: #52617a; padding: .65rem .45rem; font: inherit; font-size: .82rem; font-weight: 800; cursor: pointer; }
+.weekday-tab:hover { background: #f0f3f7; color: #172033; }
+.weekday-tab.is-active { background: #e7f1e9; color: #176638; box-shadow: inset 0 -2px 0 #258348; }
+.availability-day-panel { padding-top: 1.5rem; }
+.availability-day-panel.is-hidden { display: none; }
+.availability-day-panel h2 { margin-bottom: 1.25rem; }
+.time-picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; max-width: 560px; }
+.time-picker { min-width: 0; margin: 0; border: 0; padding: 0; }
+.time-picker legend { margin-bottom: .45rem; color: #2c3850; font-size: .9rem; font-weight: 700; }
+.time-picker-controls { display: flex; align-items: center; gap: .35rem; }
+.time-picker-controls label { margin: 0; }
+.time-picker-controls select { width: auto; min-width: 3.7rem; margin: 0; padding: .7rem .45rem; }
+.time-picker-controls label:last-child select { min-width: 4.6rem; }
+.time-separator { color: #52617a; font-size: 1.2rem; font-weight: 800; }
+.saved-windows { margin-top: 2rem; border-top: 1px solid #e3e9f2; padding-top: 1.5rem; }
+.saved-windows h3 { margin-bottom: .85rem; }
+.availability-edit-form { display: flex; align-items: end; gap: .8rem; flex-wrap: wrap; }
+.compact-time-picker-grid { flex: 1 1 460px; max-width: none; }
 .members-card { overflow: visible; }
 .member-heading { align-items: flex-start; }
 .compact-actions { display: flex; align-items: flex-start; flex-wrap: wrap; gap: .65rem; }
@@ -105,9 +126,10 @@ tr:last-child td { border-bottom: 0; }
 .matrix-member { background: #fbfcff; text-align: left; }
 .matrix-member strong, .matrix-member a { display: block; }
 .matrix-member a { margin-top: .25rem; font-size: .72rem; text-transform: none; letter-spacing: 0; }
-.availability-window { display: block; margin-bottom: .38rem; border-radius: 6px; background: #edf2ff; color: #284eaa; padding: .36rem .45rem; font-size: .75rem; font-weight: 750; text-align: center; white-space: nowrap; }
+.availability-matrix td { background: #fafbfc; }
+.availability-window { display: block; margin-bottom: .38rem; border: 1px solid #c9dfd0; border-radius: 6px; background: #edf6ef; color: #235d37; padding: .36rem .45rem; font-size: .75rem; font-weight: 750; text-align: center; white-space: nowrap; }
 .availability-window:last-child { margin-bottom: 0; }
-.no-availability { display: block; color: #a0aabc; padding: .36rem; text-align: center; }
+.no-availability { display: block; color: #7b8799; padding: .36rem; text-align: center; }
 .plan-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
 .plan-summary div { border-right: 1px solid #e3e9f2; }
 .plan-summary div:last-child { border-right: 0; }
@@ -182,10 +204,11 @@ tr:last-child td { border-bottom: 0; }
 .rsvp-list { display: grid; gap: .7rem; }
 .rsvp-row { display: grid; grid-template-columns: minmax(180px, .7fr) 1.3fr; align-items: center; gap: 1rem; padding: 1rem 1.2rem; }
 .rsvp-member { display: flex; flex-direction: column; gap: .25rem; }
-.rsvp-status { color: #52617a; font-size: .82rem; font-weight: 700; }
-.status-attending { color: #18723a; }
-.status-not_attending { color: #a42b20; }
-.status-arriving_late, .status-leaving_early, .status-arriving_late_leaving_early { color: #8a4d14; }
+.rsvp-status { display: inline-flex; align-items: center; gap: .45rem; color: #52617a; font-size: .82rem; font-weight: 700; }
+.rsvp-status-dot { width: .65rem; height: .65rem; flex: 0 0 .65rem; border-radius: 50%; background: #d89b39; }
+.status-attending { color: #18723a; }.status-attending .rsvp-status-dot { background: #26834a; }
+.status-not_attending { color: #596577; }.status-not_attending .rsvp-status-dot { background: #7d8796; }
+.status-arriving_late, .status-leaving_early, .status-arriving_late_leaving_early { color: #39734b; }.status-arriving_late .rsvp-status-dot, .status-leaving_early .rsvp-status-dot, .status-arriving_late_leaving_early .rsvp-status-dot { background: #78ad89; }
 .rsvp-form { display: grid; grid-template-columns: 1.1fr .8fr .8fr auto; align-items: end; gap: .65rem; }
 .rsvp-form label { margin: 0; }
 .rsvp-form .button { white-space: nowrap; }
@@ -206,6 +229,8 @@ tr:last-child td { border-bottom: 0; }
   .compact-actions .button { width: 100%; }
   .compact-member-form { right: auto; left: 0; }
   .availability-row { align-items: stretch; flex-direction: column; }
+  .time-picker-grid { grid-template-columns: 1fr; }
+  .availability-edit-form { align-items: stretch; }
   .preview-result { grid-template-columns: 1fr 1fr; }
   .rsvp-row { grid-template-columns: 1fr; }
   .rsvp-form { grid-template-columns: 1fr 1fr; }

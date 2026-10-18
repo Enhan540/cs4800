@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from urllib.parse import urlsplit
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -31,10 +31,6 @@ def object_id(value):
 
 def create_app(database_override=None):
     app = Flask(__name__)
-    try:
-        app_timezone = ZoneInfo(os.getenv("APP_TIMEZONE", "America/Los_Angeles"))
-    except ZoneInfoNotFoundError:
-        app_timezone = datetime.now().astimezone().tzinfo or timezone.utc
     app.config["SECRET_KEY"] = (
         os.getenv("SECRET_KEY")
         or os.getenv("FLASK_SECRET_KEY")
@@ -89,10 +85,35 @@ def create_app(database_override=None):
             abort(404)
         return plan
 
+    def normalize_selector_time(form, prefix):
+        """Turn the three-part availability picker into a stored HH:MM value."""
+        hour = form.get(f"{prefix}_hour", "").strip()
+        minute = form.get(f"{prefix}_minute", "").strip()
+        period = form.get(f"{prefix}_period", "").strip().upper()
+
+        if not any((hour, minute, period)):
+            return form.get(f"{prefix}_time", "").strip()
+        if not all((hour, minute, period)):
+            raise ValueError("Choose an hour, minute, and AM or PM.")
+        if hour not in {str(value) for value in range(1, 13)}:
+            raise ValueError("Please choose a valid hour.")
+        if minute not in {f"{value:02d}" for value in range(0, 60, 5)}:
+            raise ValueError("Please choose a valid five-minute interval.")
+        if period not in {"AM", "PM"}:
+            raise ValueError("Please choose AM or PM.")
+
+        hour_value = int(hour) % 12
+        if period == "PM":
+            hour_value += 12
+        return f"{hour_value:02d}:{int(minute):02d}"
+
     def validate_availability(form):
         day = form.get("day", "").strip()
-        start_time = form.get("start_time", "").strip()
-        end_time = form.get("end_time", "").strip()
+        try:
+            start_time = normalize_selector_time(form, "start")
+            end_time = normalize_selector_time(form, "end")
+        except ValueError as exc:
+            return None, str(exc)
 
         if not all([day, start_time, end_time]):
             return None, "Day, start time, and end time are required."
@@ -113,6 +134,26 @@ def create_app(database_override=None):
             "end_time": end_time,
             "status": "available",
         }, None
+
+    def availability_return_context():
+        """Return only to known in-app parents, never to an external URL."""
+        requested = request.values.get("return_to", "").strip()
+        parsed = urlsplit(requested)
+        if not requested or parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
+            return url_for("users"), "Members"
+        if parsed.path == url_for("users"):
+            return url_for("users"), "Members"
+
+        group_prefix = "/groups/"
+        if parsed.path.startswith(group_prefix):
+            group_value = parsed.path[len(group_prefix):].split("/", 1)[0]
+            try:
+                group = require_database().groups.find_one({"_id": ObjectId(group_value)})
+            except InvalidId:
+                group = None
+            if group and parsed.path == url_for("group_detail", group_id=group["_id"]):
+                return url_for("group_detail", group_id=group["_id"]), group["name"]
+        return url_for("users"), "Members"
 
     def validate_plan_form(form, group_size, require_title=True):
         values = {
@@ -321,6 +362,21 @@ def create_app(database_override=None):
             return datetime.strptime(value, "%H:%M").strftime("%I:%M %p").lstrip("0")
         except ValueError:
             return value
+
+    @app.template_filter("time_parts")
+    def time_parts(value):
+        """Convert a normalized time into values for the 12-hour editor."""
+        try:
+            hour_24, minute = map(int, str(value).split(":"))
+            if not 0 <= hour_24 <= 23 or minute not in range(60):
+                raise ValueError
+        except (TypeError, ValueError):
+            hour_24, minute = 9, 0
+        return {
+            "hour": hour_24 % 12 or 12,
+            "minute": f"{minute:02d}",
+            "period": "PM" if hour_24 >= 12 else "AM",
+        }
 
     @app.template_filter("duration_label")
     def duration_label(minutes):
@@ -612,6 +668,7 @@ def create_app(database_override=None):
     def member_availability(user_id):
         db = require_database()
         user = get_user(user_id)
+        return_to, return_label = availability_return_context()
         if request.method == "POST":
             values, error = validate_availability(request.form)
             if error:
@@ -620,14 +677,21 @@ def create_app(database_override=None):
                 values.update({"user_id": user["_id"], "created_at": utc_now(), "updated_at": utc_now()})
                 db.availability.insert_one(values)
                 flash("Availability window added.", "success")
-            return redirect(url_for("member_availability", user_id=user_id))
+            return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
 
         entries = list(
             db.availability.find({"user_id": user["_id"]}).sort(
                 [("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
         )
-        return render_template("member_availability.html", user=user, entries=entries, days=DAYS)
+        return render_template(
+            "member_availability.html",
+            user=user,
+            entries=entries,
+            days=DAYS,
+            return_to=return_to,
+            return_label=return_label,
+        )
 
     @app.post("/availability/<availability_id>/edit")
     def edit_availability(availability_id):
@@ -643,7 +707,8 @@ def create_app(database_override=None):
             values["updated_at"] = utc_now()
             db.availability.update_one({"_id": entry_id}, {"$set": values})
             flash("Availability window updated.", "success")
-        return redirect(url_for("member_availability", user_id=entry["user_id"]))
+        return_to, _return_label = availability_return_context()
+        return redirect(url_for("member_availability", user_id=entry["user_id"], return_to=return_to))
 
     @app.post("/availability/<availability_id>/delete")
     def delete_availability(availability_id):
@@ -653,7 +718,8 @@ def create_app(database_override=None):
             abort(404)
         db.availability.delete_one({"_id": entry["_id"]})
         flash("Availability window deleted.", "success")
-        return redirect(url_for("member_availability", user_id=entry["user_id"]))
+        return_to, _return_label = availability_return_context()
+        return redirect(url_for("member_availability", user_id=entry["user_id"], return_to=return_to))
 
     @app.route("/groups/<group_id>/plans/create", methods=["GET", "POST"])
     def create_plan(group_id):

@@ -1,34 +1,28 @@
 {% extends "base.html" %}
-{% block title %}{{ user.display_name }} availability | Meetwise{% endblock %}
-{% block content %}
-<section class="page-heading"><div><p class="eyebrow">Recurring weekly availability</p><h1>{{ user.display_name }}</h1><p class="muted">Add as many available windows per day as needed.</p></div><a class="button secondary" href="{{ url_for('users') }}">All members</a></section>
-<section class="card">
-  <h2>Add availability</h2>
-  <form method="post" class="inline-form">
-    <label for="day">Day<select id="day" name="day" required><option value="">Choose day</option>{% for day in days %}<option value="{{ day }}">{{ day }}</option>{% endfor %}</select></label>
-    <label for="start_time">Start<input id="start_time" name="start_time" type="time" required></label>
-    <label for="end_time">End<input id="end_time" name="end_time" type="time" required></label>
-    <button class="button" type="submit">Add window</button>
-  </form>
-</section>
-<section class="content-section">
-  <h2>Saved windows</h2>
-  {% if entries %}
-    <div class="availability-list">
-      {% for entry in entries %}
-        <article class="card availability-row">
-          <form method="post" action="{{ url_for('edit_availability', availability_id=entry._id) }}" class="inline-form grow">
-            <label>Day<select name="day" required>{% for day in days %}<option value="{{ day }}" {% if day == entry.day %}selected{% endif %}>{{ day }}</option>{% endfor %}</select></label>
-            <label>Start<input name="start_time" type="time" required value="{{ entry.start_time }}"></label>
-            <label>End<input name="end_time" type="time" required value="{{ entry.end_time }}"></label>
-            <button class="button secondary" type="submit">Save</button>
-          </form>
-          <form method="post" action="{{ url_for('delete_availability', availability_id=entry._id) }}" data-confirm="Delete this availability window?">
-            <button class="button danger" type="submit">Delete</button>
-          </form>
-        </article>
-      {% endfor %}
+{% block title %}{{ user.display_name }} availability | Group Planner{% endblock %}
+{% macro time_picker(prefix, value, label) -%}
+  {% set parts = value|time_parts %}
+  <fieldset class="time-picker" data-time-picker data-time-role="{{ prefix }}">
+    <legend>{{ label }}</legend>
+    <div class="time-picker-controls">
+      <label><span class="sr-only">{{ label }} hour</span><select name="{{ prefix }}_hour" aria-label="{{ label }} hour" required>{% for hour in range(1, 13) %}<option value="{{ hour }}" {% if parts.hour == hour %}selected{% endif %}>{{ hour }}</option>{% endfor %}</select></label>
+      <span class="time-separator" aria-hidden="true">:</span>
+      <label><span class="sr-only">{{ label }} minute</span><select name="{{ prefix }}_minute" aria-label="{{ label }} minute" required>{% for minute in range(0, 60, 5) %}{% set minute_value = '%02d'|format(minute) %}<option value="{{ minute_value }}" {% if parts.minute == minute_value %}selected{% endif %}>{{ minute_value }}</option>{% endfor %}</select></label>
+      <label><span class="sr-only">{{ label }} AM or PM</span><select name="{{ prefix }}_period" aria-label="{{ label }} AM or PM" required>{% for period in ('AM', 'PM') %}<option value="{{ period }}" {% if parts.period == period %}selected{% endif %}>{{ period }}</option>{% endfor %}</select></label>
     </div>
-  {% else %}<div class="card empty-state compact"><p>No weekly availability saved yet.</p></div>{% endif %}
+  </fieldset>
+{%- endmacro %}
+{% block content %}
+<a class="back-link" href="{{ return_to }}">← Back to {{ return_label }}</a>
+<section class="page-heading with-back-link"><div><p class="eyebrow">Recurring weekly availability</p><h1>{{ user.display_name }}</h1><p class="muted">Choose a day, then add as many available windows as needed.</p></div></section>
+<section class="card availability-editor" data-availability-editor>
+  <div class="weekday-tabs" role="tablist" aria-label="Weekdays">{% for day in days %}<button class="weekday-tab {% if loop.first %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if loop.first else 'false' }}" data-availability-day="{{ day }}">{{ day[:3] }}</button>{% endfor %}</div>
+  {% for day in days %}
+    <div class="availability-day-panel {% if not loop.first %}is-hidden{% endif %}" data-availability-panel="{{ day }}">
+      <h2>{{ day }} Availability</h2>
+      <form method="post" class="availability-add-form" data-availability-add-form><input type="hidden" name="day" value="{{ day }}"><input type="hidden" name="return_to" value="{{ return_to }}"><div class="time-picker-grid">{{ time_picker('start', '09:00', 'Start time') }}{{ time_picker('end', '10:00', 'End time') }}</div><p class="field-help">Availability stays within one day. End time must be later than start time.</p><button class="button" type="submit">+ Add Availability Window</button></form>
+      <div class="saved-windows"><h3>Current {{ day }} Availability</h3>{% set day_entries = entries|selectattr('day', 'equalto', day)|list %}{% if day_entries %}<div class="availability-list">{% for entry in day_entries %}<article class="card availability-row"><form method="post" action="{{ url_for('edit_availability', availability_id=entry._id, return_to=return_to) }}" class="availability-edit-form grow"><input type="hidden" name="day" value="{{ day }}"><div class="time-picker-grid compact-time-picker-grid">{{ time_picker('start', entry.start_time, 'Start time') }}{{ time_picker('end', entry.end_time, 'End time') }}</div><button class="button secondary" type="submit">Save</button></form><form method="post" action="{{ url_for('delete_availability', availability_id=entry._id, return_to=return_to) }}" data-confirm="Delete this availability window?"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="button danger" type="submit">Remove</button></form></article>{% endfor %}</div>{% else %}<p class="muted small">No availability saved for {{ day }} yet.</p>{% endif %}</div>
+    </div>
+  {% endfor %}
 </section>
 {% endblock %}

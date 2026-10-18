@@ -1,12 +1,11 @@
 {% extends "base.html" %}
-{% block title %}{{ group.name }} | Meetwise{% endblock %}
+{% block title %}{{ group.name }} | Group Planner{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ url_for('index') }}">← Back to Dashboard</a>
 <section class="page-heading with-back-link">
   <div><p class="eyebrow">Group</p><h1>{{ group.name }}</h1><p class="muted">{{ group.description or 'No description added.' }}</p></div>
   <div class="button-row heading-actions">
     <a class="button secondary" href="{{ url_for('edit_group', group_id=group._id) }}">Edit Group</a>
-    <a class="button" href="{{ url_for('create_plan', group_id=group._id) }}">Create Plan</a>
     <form method="post" action="{{ url_for('delete_group', group_id=group._id) }}" data-confirm="Delete this group and all of its plans? Members and their availability will be kept."><button class="button danger" type="submit">Delete Group</button></form>
   </div>
 </section>
@@ -44,7 +43,7 @@
       <a class="button secondary" href="{{ url_for('users', group_id=group._id) }}">+ Create New</a>
     </div>
   </div>
-  {% if members %}<div class="member-chips">{% for member in members %}<a class="member-chip" href="{{ url_for('member_availability', user_id=member._id) }}"><strong>{{ member.display_name }}</strong><span>Edit availability</span></a>{% endfor %}</div>{% else %}<p class="muted">Add at least one member before creating a plan.</p>{% endif %}
+  {% if members %}<div class="member-chips">{% for member in members %}<a class="member-chip" href="{{ url_for('member_availability', user_id=member._id, return_to=url_for('group_detail', group_id=group._id)) }}"><strong>{{ member.display_name }}</strong><span>Edit availability</span></a>{% endfor %}</div>{% else %}<p class="muted">Add at least one member before creating a plan.</p>{% endif %}
   {% if not available_users and members %}<p class="muted small member-note">All existing members are already in this group.</p>{% endif %}
 </section>
 
@@ -52,13 +51,13 @@
   <div class="section-heading"><div><h2>Weekly Availability</h2><p class="muted small section-subtitle">Recurring availability shown below</p></div></div>
   {% if availability_rows %}
     <div class="table-wrapper availability-matrix-wrapper"><table class="availability-matrix"><thead><tr><th>Member</th>{% for day in availability_days %}<th>{{ day[:3] }}</th>{% endfor %}</tr></thead><tbody>
-      {% for row in availability_rows %}<tr><th class="matrix-member"><strong>{{ row.member.display_name }}</strong><a href="{{ url_for('member_availability', user_id=row.member._id) }}">Edit availability</a></th>{% for day in availability_days %}<td>{% if row.days[day] %}{% for window in row.days[day] %}<span class="availability-window">{{ window.start_time|time12 }}–{{ window.end_time|time12 }}</span>{% endfor %}{% else %}<span class="no-availability">—</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}
+      {% for row in availability_rows %}<tr><th class="matrix-member"><strong>{{ row.member.display_name }}</strong><a href="{{ url_for('member_availability', user_id=row.member._id, return_to=url_for('group_detail', group_id=group._id)) }}">Edit availability</a></th>{% for day in availability_days %}<td>{% if row.days[day] %}{% for window in row.days[day] %}<span class="availability-window">{{ window.start_time|time12 }}–{{ window.end_time|time12 }}</span>{% endfor %}{% else %}<span class="no-availability">—</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}
     </tbody></table></div>
   {% else %}<div class="card empty-state compact"><p>Add members to begin building the weekly availability matrix.</p></div>{% endif %}
 </section>
 
 <section class="content-section">
-  <div class="section-heading"><div><h2>Planning</h2><p class="muted small section-subtitle">Plans that still need a confirmed time.</p></div><a href="{{ url_for('create_plan', group_id=group._id) }}">Create Plan</a></div>
+  <div class="section-heading"><div><h2>Planning</h2><p class="muted small section-subtitle">Plans that still need a confirmed time.</p></div><a class="button" href="{{ url_for('create_plan', group_id=group._id) }}">+ Create Plan</a></div>
   {% if planning_plans %}<div class="plan-card-grid">{% for plan in planning_plans %}<article class="card lifecycle-card planning-plan-card"><span class="lifecycle-label">Planning</span><h3><a class="card-title-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">{{ plan.title }}</a></h3><p class="plan-card-date">{{ plan.start_date|plan_date }} – {{ plan.end_date|plan_date }}</p><p class="muted">{{ plan.duration_minutes|duration_label }} · Minimum {{ plan.minimum_attendance }} attendees</p>{% if plan.matches %}<p class="best-match"><strong>Best match:</strong><span>{{ plan.matches[0].day[:3] }} {{ plan.matches[0].start_time|time12 }} · {{ plan.matches[0].attendance_count }}/{{ plan.matches[0].total_members }} available</span></p>{% else %}<p class="best-match muted">Open the plan to calculate current matches.</p>{% endif %}</article>{% endfor %}</div>{% else %}<div class="card empty-state compact"><p>No plans currently need scheduling.</p></div>{% endif %}
 </section>
 {% endblock %}

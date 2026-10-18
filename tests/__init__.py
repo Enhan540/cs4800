@@ -1,1 +1,1 @@
-"""Test package for the Meetwise Flask application."""
+"""Test package for the Group Planner Flask application."""

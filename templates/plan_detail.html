@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ plan.title }} | Meetwise{% endblock %}
+{% block title %}{{ plan.title }} | Group Planner{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
 
@@ -55,12 +55,13 @@
             <div class="rsvp-member">
               <strong>{{ row.member.display_name }}</strong>
               <span class="rsvp-status status-{{ row.status }}">
-                {% if row.status == 'attending' %}✓ Attending
-                {% elif row.status == 'not_attending' %}✕ Not Attending
-                {% elif row.status == 'arriving_late' %}◷ Arriving at {{ row.arrival_time|time12 }}
-                {% elif row.status == 'leaving_early' %}◷ Leaving at {{ row.departure_time|time12 }}
-                {% elif row.status == 'arriving_late_leaving_early' %}◷ {{ row.arrival_time|time12 }} – {{ row.departure_time|time12 }}
-                {% else %}— No Response{% endif %}
+                <span class="rsvp-status-dot" aria-hidden="true"></span>
+                {% if row.status == 'attending' %}Attending
+                {% elif row.status == 'not_attending' %}Not attending
+                {% elif row.status == 'arriving_late' %}Arriving at {{ row.arrival_time|time12 }}
+                {% elif row.status == 'leaving_early' %}Leaving at {{ row.departure_time|time12 }}
+                {% elif row.status == 'arriving_late_leaving_early' %}{{ row.arrival_time|time12 }} – {{ row.departure_time|time12 }}
+                {% else %}Awaiting response{% endif %}
               </span>
             </div>
             <form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form>

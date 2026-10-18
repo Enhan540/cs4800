@@ -1,13 +1,13 @@
-# Meetwise — CS4800 Group Scheduling MVP
+# Group Planner — CS4800 Group Scheduling MVP
 
-Meetwise is a deployable first MVP for recurring group scheduling. It lets users create reusable members and groups, record weekly availability, create plans, and rank matching meeting windows by attendance.
+Group Planner is a web application for recurring groups to save member availability, find overlapping meeting times, schedule plans, and track attendance.
 
 ## MVP features
 
 - Persistent `users`, `groups`, `availability`, and `plans` MongoDB collections
 - Reusable members with optional email addresses
 - Groups with compact member management and a responsive weekly availability matrix
-- Multiple recurring availability windows per member and day
+- Multiple recurring availability windows per member and day, using a weekday editor with 5-minute time precision
 - Add, edit, and delete availability
 - Plans with any positive whole-minute duration, date range, allowed time range, and minimum attendance
 - A separate scheduling service that searches start times in 30-minute increments while preserving arbitrary durations
@@ -23,7 +23,7 @@ Meetwise is a deployable first MVP for recurring group scheduling. It lets users
 - Persistent per-member RSVP responses: attending, not attending, arriving late, leaving early, or both arriving late and leaving early
 - Dynamically generated 15-minute RSVP time choices constrained to the confirmed event
 - Plan participant invitations that reuse existing group members without duplicate records
-- RSVP attendance summaries on scheduled plans and plan cards
+- RSVP attendance summaries and partial-attendance details on scheduled plans and plan cards
 - Flask validation, flash messages, and 404/500/503 pages
 - Pytest scheduling tests and GitHub Actions CI before EC2 deployment
 
@@ -83,7 +83,7 @@ MongoDB creates the four collections when data is first inserted. Availability d
 pytest -q
 ```
 
-The tests cover arbitrary 45/75/125/180-minute durations, shorter alternatives, minimum attendance, the required three-person overlap, deletion cleanup, plan lifecycle categorization, automatic previews, group editing, scheduling, constrained and combined RSVP responses, member invitations, upcoming filtering, dashboard organization, and group-aware member creation.
+The tests cover availability validation and normalized time storage, arbitrary 45/75/125/180-minute durations, shorter alternatives, minimum attendance, the required three-person overlap, deletion cleanup, plan lifecycle categorization, automatic previews, group editing, scheduling, constrained and combined RSVP responses, member invitations, upcoming filtering, dashboard organization, and group-aware member creation.
 
 ## Acceptance demo
 

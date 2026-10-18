@@ -544,10 +544,10 @@ def test_rsvp_attendance_display_and_counts(app_and_db):
     page = app.test_client().get(f"/plans/{plan_id}").get_data(as_text=True)
 
     assert "2/4 attending" in page
-    assert "✓ Attending" in page
-    assert "◷ Arriving at 8:00 PM" in page
-    assert "✕ Not Attending" in page
-    assert "— No Response" in page
+    assert "Attending" in page
+    assert "Arriving at 8:00 PM" in page
+    assert "Not attending" in page
+    assert "Awaiting response" in page
 
 
 def add_preview_availability(database, member_id, start, end):
@@ -874,3 +874,109 @@ def test_dashboard_has_clickable_groups_and_only_future_scheduled_plans(app_and_
     assert "Past Movie" not in page
     assert "Unconfirmed Movie" not in page
     assert "Needs Planning" not in page
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected_start", "expected_end"),
+    [
+        ((9, "00", "AM"), (10, "00", "AM"), "09:00", "10:00"),
+        ((9, "05", "AM"), (10, "50", "AM"), "09:05", "10:50"),
+        ((1, "35", "PM"), (4, "20", "PM"), "13:35", "16:20"),
+        ((11, "00", "PM"), (11, "55", "PM"), "23:00", "23:55"),
+        ((12, "00", "AM"), (12, "05", "AM"), "00:00", "00:05"),
+        ((12, "00", "PM"), (1, "35", "PM"), "12:00", "13:35"),
+    ],
+)
+def test_availability_picker_stores_normalized_five_minute_times(
+    app_and_db, start, end, expected_start, expected_end
+):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    response = app.test_client().post(f"/users/{member_id}/availability", data={
+        "day": "Monday",
+        "start_hour": str(start[0]), "start_minute": start[1], "start_period": start[2],
+        "end_hour": str(end[0]), "end_minute": end[1], "end_period": end[2],
+    })
+    saved = database.availability.find_one({"user_id": member_id})
+
+    assert response.status_code == 302
+    assert saved["start_time"] == expected_start
+    assert saved["end_time"] == expected_end
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [((5, "00", "PM"), (5, "00", "PM")), ((11, "00", "PM"), (1, "00", "AM"))],
+)
+def test_availability_picker_rejects_invalid_same_day_ranges(app_and_db, start, end):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    response = app.test_client().post(f"/users/{member_id}/availability", data={
+        "day": "Monday",
+        "start_hour": str(start[0]), "start_minute": start[1], "start_period": start[2],
+        "end_hour": str(end[0]), "end_minute": end[1], "end_period": end[2],
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"End time must be later than start time." in response.data
+    assert database.availability.count_documents({"user_id": member_id}) == 0
+
+
+def test_availability_editor_has_weekdays_and_populates_edit_picker(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": "18:35", "end_time": "20:05", "status": "available",
+    })
+
+    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+
+    assert all(f'data-availability-day="{day}"' in page for day in (
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
+    ))
+    assert 'value="6" selected' in page
+    assert 'value="35" selected' in page
+    assert 'value="PM" selected' in page
+    assert 'value="8" selected' in page
+    assert 'value="05" selected' in page
+
+
+def test_availability_back_link_preserves_group_or_member_parent(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    client = app.test_client()
+
+    group_page = client.get(f"/groups/{group_id}").get_data(as_text=True)
+    availability_page = client.get(
+        f"/users/{member_id}/availability?return_to=/groups/{group_id}"
+    ).get_data(as_text=True)
+    members_page = client.get(f"/users/{member_id}/availability").get_data(as_text=True)
+
+    assert f'return_to=/groups/{group_id}' in group_page
+    assert f'href="/groups/{group_id}"' in availability_page
+    assert "Back to Friday Friends" in availability_page
+    assert 'href="/users"' in members_page
+    assert "Back to Members" in members_page
+
+
+def test_group_planning_contains_create_plan_and_branding_is_updated(app_and_db):
+    app, database = app_and_db
+    group_id = make_group(database)
+    page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
+    dashboard = app.test_client().get("/").get_data(as_text=True)
+
+    assert page.index("<h2>Planning</h2>") < page.index("+ Create Plan")
+    assert page.index("Edit Group") < page.index("<h2>Planning</h2>")
+    assert "Group Planner" in dashboard

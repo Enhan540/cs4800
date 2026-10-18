@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Meetwise{% endblock %}</title>
+  <title>{% block title %}Group Planner{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
   <header class="site-header">
     <div class="container header-content">
-      <a class="brand" href="{{ url_for('index') }}">Meetwise</a>
+      <a class="brand" href="{{ url_for('index') }}">Group Planner</a>
       <nav aria-label="Main navigation">
         <a href="{{ url_for('index') }}">Dashboard</a>
         <a href="{{ url_for('groups') }}">Groups</a>

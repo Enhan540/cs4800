@@ -1,7 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Groups | Meetwise{% endblock %}
+{% block title %}Groups | Group Planner{% endblock %}
 {% block content %}
-<section class="page-heading">
+<a class="back-link" href="{{ url_for('index') }}">← Back to Dashboard</a>
+<section class="page-heading with-back-link">
   <div><p class="eyebrow">Your teams</p><h1>Groups</h1></div>
   <a class="button" href="{{ url_for('create_group') }}">Create group</a>
 </section>

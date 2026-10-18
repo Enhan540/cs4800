@@ -25,6 +25,56 @@ document.addEventListener("DOMContentLoaded", () => {
     updateTimeFields();
   });
 
+  document.querySelectorAll("[data-availability-editor]").forEach((editor) => {
+    const tabs = editor.querySelectorAll("[data-availability-day]");
+    const panels = editor.querySelectorAll("[data-availability-panel]");
+    const activateDay = (day) => {
+      tabs.forEach((tab) => {
+        const active = tab.dataset.availabilityDay === day;
+        tab.classList.toggle("is-active", active);
+        tab.setAttribute("aria-selected", String(active));
+      });
+      panels.forEach((panel) => {
+        panel.classList.toggle("is-hidden", panel.dataset.availabilityPanel !== day);
+      });
+    };
+    tabs.forEach((tab) => tab.addEventListener("click", () => activateDay(tab.dataset.availabilityDay)));
+
+    const pickerMinutes = (picker) => {
+      const hour = Number(picker.querySelector('[name$="_hour"]').value) % 12;
+      const minute = Number(picker.querySelector('[name$="_minute"]').value);
+      return hour * 60 + minute + (picker.querySelector('[name$="_period"]').value === "PM" ? 720 : 0);
+    };
+    const setPickerMinutes = (picker, minutes) => {
+      const period = minutes >= 720 ? "PM" : "AM";
+      const displayMinutes = minutes % 720;
+      const hour = Math.floor(displayMinutes / 60) || 12;
+      const minute = String(displayMinutes % 60).padStart(2, "0");
+      picker.querySelector('[name$="_hour"]').value = String(hour);
+      picker.querySelector('[name$="_minute"]').value = minute;
+      picker.querySelector('[name$="_period"]').value = period;
+    };
+
+    editor.querySelectorAll("[data-availability-add-form]").forEach((form) => {
+      const startPicker = form.querySelector('[data-time-role="start"]');
+      const endPicker = form.querySelector('[data-time-role="end"]');
+      startPicker.querySelectorAll("select").forEach((select) => {
+        select.addEventListener("change", () => {
+          const suggestedEnd = pickerMinutes(startPicker) + 60;
+          if (suggestedEnd < 1440) setPickerMinutes(endPicker, suggestedEnd);
+        });
+      });
+      form.addEventListener("submit", (event) => {
+        if (pickerMinutes(endPicker) <= pickerMinutes(startPicker)) {
+          event.preventDefault();
+          endPicker.querySelector("select").setCustomValidity("End time must be later than start time.");
+          endPicker.querySelector("select").reportValidity();
+          endPicker.querySelector("select").setCustomValidity("");
+        }
+      });
+    });
+  });
+
   const planForm = document.querySelector("form[data-schedule-preview-url]");
   if (!planForm) return;
 

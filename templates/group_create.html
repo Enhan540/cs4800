@@ -1,7 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Create group | Meetwise{% endblock %}
+{% block title %}Create group | Group Planner{% endblock %}
 {% block content %}
-<section class="narrow-page">
+<a class="back-link" href="{{ url_for('groups') }}">← Back to Groups</a>
+<section class="narrow-page with-back-link">
   <p class="eyebrow">New group</p><h1>Create a recurring group</h1>
   <section class="card">
     <form method="post">
