@@ -20,7 +20,7 @@ jobs:
             requirements-dev.txt
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
-      - name: Run scheduling tests
+      - name: Run tests
         run: pytest -q
 
   deploy:
