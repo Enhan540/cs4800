@@ -15,17 +15,12 @@
 </section>
 
 <section class="content-section dashboard-section">
-  <div class="section-heading"><div><h2>Upcoming</h2><p class="muted small section-subtitle">Scheduled plans across your groups.</p></div></div>
-  {% if upcoming_plans %}<div class="plan-card-grid">{% for plan in upcoming_plans %}<article class="card lifecycle-card scheduled-plan-card"><span class="lifecycle-label scheduled-label">{{ plan.scheduled_start|date_short }}</span><h3>{{ plan.title }}</h3><p class="plan-card-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }}</p><p class="muted small">{{ plan.group_name }}</p><p class="muted small">{{ plan.rsvp_summary.counts.overall_attending }} attending · {{ plan.rsvp_summary.counts.pending }} pending</p><a class="text-link standalone-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">View Plan →</a></article>{% endfor %}</div>{% else %}<div class="card empty-state compact"><p>No scheduled plans yet.</p></div>{% endif %}
-</section>
-
-<section class="content-section dashboard-section">
-  <div class="section-heading"><div><h2>Needs Planning</h2><p class="muted small section-subtitle">Choose a time for these plans.</p></div></div>
-  {% if planning_plans %}<div class="plan-card-grid">{% for plan in planning_plans %}<article class="card lifecycle-card planning-plan-card"><span class="lifecycle-label">Planning</span><h3>{{ plan.title }}</h3><p class="muted small">{{ plan.group_name }}</p><p>{{ plan.start_date|plan_date }} – {{ plan.end_date|plan_date }} · {{ plan.duration_minutes|duration_label }}</p><a class="text-link standalone-link" href="{{ url_for('plan_detail', plan_id=plan._id) }}">Continue Planning →</a></article>{% endfor %}</div>{% else %}<div class="card empty-state compact"><p>Nothing currently needs scheduling.</p></div>{% endif %}
+  <div class="section-heading"><div><h2>Upcoming Plans</h2><p class="muted small section-subtitle">Confirmed upcoming events across your groups.</p></div></div>
+  {% if upcoming_plans %}<div class="plan-card-grid">{% for plan in upcoming_plans %}<a class="card lifecycle-card scheduled-plan-card clickable-card" href="{{ url_for('plan_detail', plan_id=plan._id) }}"><span class="lifecycle-label scheduled-label">{{ plan.scheduled_start|date_short }}</span><h3>{{ plan.title }}</h3><p class="plan-card-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }}</p><p class="group-context">{{ plan.group_name }}</p><p class="muted small">{{ plan.rsvp_summary.counts.overall_attending }} attending · {{ plan.rsvp_summary.counts.pending }} pending</p></a>{% endfor %}</div>{% else %}<div class="card empty-state compact"><p>No upcoming plans yet.</p></div>{% endif %}
 </section>
 
 <section class="content-section dashboard-section">
   <div class="section-heading"><h2>Your Groups</h2><a href="{{ url_for('groups') }}">View all</a></div>
-  {% if groups %}<div class="card-grid">{% for group in groups %}<article class="card group-card"><span class="pill">{{ group.member_ids|length }} members</span><h3>{{ group.name }}</h3><p class="muted">{{ group.description or 'No description yet.' }}</p><a class="text-link" href="{{ url_for('group_detail', group_id=group._id) }}">Open group →</a></article>{% endfor %}</div>{% else %}<div class="card empty-state compact"><p>No groups yet. Create one to begin scheduling.</p></div>{% endif %}
+  {% if groups %}<div class="card-grid">{% for group in groups %}<a class="card group-card clickable-card" href="{{ url_for('group_detail', group_id=group._id) }}"><span class="pill">{{ group.member_ids|length }} members</span><h3>{{ group.name }}</h3><p class="muted">{{ group.description or 'No description yet.' }}</p><p class="group-card-count">{{ group.upcoming_plan_count }} upcoming plan{% if group.upcoming_plan_count != 1 %}s{% endif %}</p></a>{% endfor %}</div>{% else %}<div class="card empty-state compact"><p>No groups yet. Create one to begin scheduling.</p></div>{% endif %}
 </section>
 {% endblock %}

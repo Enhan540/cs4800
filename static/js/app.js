@@ -7,16 +7,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.querySelectorAll("[data-rsvp-form]").forEach((form) => {
     const status = form.querySelector("[data-rsvp-status]");
-    const field = form.querySelector("[data-rsvp-time-field]");
-    const input = form.querySelector("[data-rsvp-time]");
-    const updateTimeField = () => {
-      const needsTime = status.value === "arriving_late" || status.value === "leaving_early";
-      field.hidden = !needsTime;
-      input.required = needsTime;
-      if (!needsTime) input.value = "";
+    const arrivalField = form.querySelector("[data-rsvp-arrival-field]");
+    const departureField = form.querySelector("[data-rsvp-departure-field]");
+    const arrival = form.querySelector("[data-rsvp-arrival]");
+    const departure = form.querySelector("[data-rsvp-departure]");
+    const updateTimeFields = () => {
+      const needsArrival = ["arriving_late", "arriving_late_leaving_early"].includes(status.value);
+      const needsDeparture = ["leaving_early", "arriving_late_leaving_early"].includes(status.value);
+      arrivalField.hidden = !needsArrival;
+      departureField.hidden = !needsDeparture;
+      arrival.required = needsArrival;
+      departure.required = needsDeparture;
+      if (!needsArrival) arrival.value = "";
+      if (!needsDeparture) departure.value = "";
     };
-    status.addEventListener("change", updateTimeField);
-    updateTimeField();
+    status.addEventListener("change", updateTimeFields);
+    updateTimeFields();
   });
 
   const planForm = document.querySelector("form[data-schedule-preview-url]");

@@ -1,7 +1,8 @@
 """CS4800 recurring group scheduling MVP."""
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -30,6 +31,10 @@ def object_id(value):
 
 def create_app(database_override=None):
     app = Flask(__name__)
+    try:
+        app_timezone = ZoneInfo(os.getenv("APP_TIMEZONE", "America/Los_Angeles"))
+    except ZoneInfoNotFoundError:
+        app_timezone = datetime.now().astimezone().tzinfo or timezone.utc
     app.config["SECRET_KEY"] = (
         os.getenv("SECRET_KEY")
         or os.getenv("FLASK_SECRET_KEY")
@@ -201,6 +206,48 @@ def create_app(database_override=None):
             and plan.get("scheduled_end")
         )
 
+    def as_datetime(value):
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        return value if isinstance(value, datetime) else None
+
+    def is_upcoming_schedule(plan):
+        if not has_confirmed_schedule(plan):
+            return False
+        scheduled_end = as_datetime(plan.get("scheduled_end"))
+        if not scheduled_end:
+            return False
+        now = utc_now()
+        if scheduled_end.tzinfo is None:
+            scheduled_end = scheduled_end.replace(tzinfo=app_timezone)
+        return scheduled_end >= now
+
+    def plan_member_ids(plan, group):
+        invited = plan.get("invited_member_ids")
+        return invited if invited is not None else group.get("member_ids", [])
+
+    def plan_members(plan, group, members_by_id):
+        return [
+            members_by_id[member_id]
+            for member_id in plan_member_ids(plan, group)
+            if member_id in members_by_id
+        ]
+
+    def event_time_options(plan, increment_minutes=15):
+        start = as_datetime(plan.get("scheduled_start"))
+        end = as_datetime(plan.get("scheduled_end"))
+        if not start or not end or end <= start:
+            return []
+        options = []
+        current = start + timedelta(minutes=increment_minutes)
+        while current < end:
+            options.append(current.strftime("%H:%M"))
+            current += timedelta(minutes=increment_minutes)
+        return options
+
     def datetime_sort_value(value):
         if isinstance(value, str):
             try:
@@ -219,6 +266,7 @@ def create_app(database_override=None):
             "attending": 0,
             "arriving_late": 0,
             "leaving_early": 0,
+            "arriving_late_leaving_early": 0,
             "not_attending": 0,
             "no_response": 0,
         }
@@ -229,9 +277,22 @@ def create_app(database_override=None):
             if status not in counts:
                 status = "no_response"
             counts[status] += 1
-            rows.append({"member": member, "status": status, "time": response.get("time")})
+            rows.append({
+                "member": member,
+                "status": status,
+                "time": response.get("time"),
+                "arrival_time": response.get("arrival_time") or (
+                    response.get("time") if status == "arriving_late" else None
+                ),
+                "departure_time": response.get("departure_time") or (
+                    response.get("time") if status == "leaving_early" else None
+                ),
+            })
         counts["overall_attending"] = (
-            counts["attending"] + counts["arriving_late"] + counts["leaving_early"]
+            counts["attending"]
+            + counts["arriving_late"]
+            + counts["leaving_early"]
+            + counts["arriving_late_leaving_early"]
         )
         counts["pending"] = counts["no_response"]
         return {"counts": counts, "rows": rows}
@@ -268,6 +329,18 @@ def create_app(database_override=None):
             parts.append(f"{remaining} min")
         return " ".join(parts)
 
+    @app.template_filter("event_duration")
+    def event_duration(plan):
+        start = as_datetime(plan.get("scheduled_start"))
+        end = as_datetime(plan.get("scheduled_end"))
+        if not start or not end or end <= start:
+            return "—"
+        minutes = int((end - start).total_seconds() // 60)
+        if minutes % 60 == 0:
+            hours = minutes // 60
+            return f"{hours} hour" if hours == 1 else f"{hours} hours"
+        return duration_label(minutes)
+
     @app.template_filter("date_long")
     def date_long(value):
         if not value:
@@ -302,7 +375,6 @@ def create_app(database_override=None):
     def index():
         groups = []
         upcoming_plans = []
-        planning_plans = []
         stats = {"groups": 0, "members": 0, "plans": 0}
         if database is not None:
             try:
@@ -316,7 +388,10 @@ def create_app(database_override=None):
                 group_documents = {
                     group["_id"]: group
                     for group in database.groups.find(
-                        {"_id": {"$in": [plan["group_id"] for plan in all_plans]}}
+                        {"_id": {"$in": list({
+                            *[plan["group_id"] for plan in all_plans],
+                            *[group["_id"] for group in groups],
+                        })}}
                     )
                 }
                 group_names = {
@@ -333,24 +408,19 @@ def create_app(database_override=None):
                 }
                 for plan in all_plans:
                     plan["group_name"] = group_names.get(plan["group_id"], "Unknown group")
-                    group_members = [
-                        members_by_id[member_id]
-                        for member_id in group_documents.get(plan["group_id"], {}).get(
-                            "member_ids", []
-                        )
-                        if member_id in members_by_id
-                    ]
-                    plan["rsvp_summary"] = rsvp_summary(plan, group_members)
-                    if has_confirmed_schedule(plan):
+                    group = group_documents.get(plan["group_id"], {})
+                    plan["rsvp_summary"] = rsvp_summary(
+                        plan, plan_members(plan, group, members_by_id)
+                    )
+                    if is_upcoming_schedule(plan):
                         upcoming_plans.append(plan)
-                    else:
-                        planning_plans.append(plan)
                 upcoming_plans.sort(key=lambda item: datetime_sort_value(item["scheduled_start"]))
-                planning_plans.sort(
-                    key=lambda item: datetime_sort_value(item.get("created_at")), reverse=True
-                )
+                upcoming_counts = {}
+                for plan in upcoming_plans:
+                    upcoming_counts[plan["group_id"]] = upcoming_counts.get(plan["group_id"], 0) + 1
+                for group in groups:
+                    group["upcoming_plan_count"] = upcoming_counts.get(group["_id"], 0)
                 upcoming_plans = upcoming_plans[:6]
-                planning_plans = planning_plans[:6]
             except PyMongoError:
                 app.logger.exception("Unable to load dashboard data")
                 flash("Some dashboard data could not be loaded.", "error")
@@ -359,7 +429,6 @@ def create_app(database_override=None):
             stats=stats,
             groups=groups,
             upcoming_plans=upcoming_plans,
-            planning_plans=planning_plans,
         )
 
     @app.route("/users", methods=["GET", "POST"])
@@ -463,6 +532,7 @@ def create_app(database_override=None):
         group = get_group(group_id)
         member_ids = group.get("member_ids", [])
         members = list(db.users.find({"_id": {"$in": member_ids}}).sort("display_name", ASCENDING))
+        members_by_id = {member["_id"]: member for member in members}
         entries = list(
             db.availability.find({"user_id": {"$in": member_ids}}).sort(
                 [("day_order", ASCENDING), ("start_time", ASCENDING)]
@@ -487,10 +557,12 @@ def create_app(database_override=None):
         scheduled_plans = []
         planning_plans = []
         for plan in plans:
-            if has_confirmed_schedule(plan):
-                plan["rsvp_summary"] = rsvp_summary(plan, members)
+            if is_upcoming_schedule(plan):
+                plan["rsvp_summary"] = rsvp_summary(
+                    plan, plan_members(plan, group, members_by_id)
+                )
                 scheduled_plans.append(plan)
-            else:
+            elif not has_confirmed_schedule(plan):
                 planning_plans.append(plan)
         scheduled_plans.sort(key=lambda item: datetime_sort_value(item["scheduled_start"]))
         planning_plans.sort(
@@ -505,6 +577,7 @@ def create_app(database_override=None):
             availability_rows=availability_rows,
             scheduled_plans=scheduled_plans,
             planning_plans=planning_plans,
+            upcoming_plan_count=len(scheduled_plans),
         )
 
     @app.post("/groups/<group_id>/members")
@@ -592,6 +665,7 @@ def create_app(database_override=None):
 
             values.update({
                 "group_id": group["_id"],
+                "invited_member_ids": list(group.get("member_ids", [])),
                 "status": "planning",
                 "matches": [],
                 "created_at": utc_now(),
@@ -640,7 +714,17 @@ def create_app(database_override=None):
         group = db.groups.find_one({"_id": plan["group_id"]})
         if not group:
             abort(404)
-        members = list(db.users.find({"_id": {"$in": group.get("member_ids", [])}}))
+        group_members = list(
+            db.users.find({"_id": {"$in": group.get("member_ids", [])}}).sort(
+                "display_name", ASCENDING
+            )
+        )
+        members_by_id = {member["_id"]: member for member in group_members}
+        members = plan_members(plan, group, members_by_id)
+        participant_ids = set(plan_member_ids(plan, group))
+        eligible_invitees = [
+            member for member in group_members if member["_id"] not in participant_ids
+        ]
         if not has_confirmed_schedule(plan) and not plan.get("matches"):
             try:
                 refresh_plan_matches(plan, group)
@@ -653,6 +737,8 @@ def create_app(database_override=None):
             group=group,
             member_map=member_map,
             rsvp=rsvp_summary(plan, members),
+            eligible_invitees=eligible_invitees,
+            event_time_options=event_time_options(plan),
         )
 
     @app.route("/plans/<plan_id>/edit", methods=["GET", "POST"])
@@ -741,6 +827,29 @@ def create_app(database_override=None):
         flash(f"Plan scheduled for {date_text}, {start_text} - {end_text}.", "success")
         return redirect(url_for("plan_detail", plan_id=plan["_id"]))
 
+    @app.post("/plans/<plan_id>/invite")
+    def invite_plan_member(plan_id):
+        db = require_database()
+        plan = get_plan(plan_id)
+        if not has_confirmed_schedule(plan):
+            flash("Members can be invited after the plan is scheduled.", "error")
+            return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+        group = db.groups.find_one({"_id": plan["group_id"]})
+        if not group:
+            abort(404)
+        member_id = object_id(request.form.get("member_id"))
+        member = db.users.find_one({"_id": member_id})
+        if not member or member_id not in group.get("member_ids", []):
+            abort(404)
+        if member_id in plan_member_ids(plan, group):
+            flash("That member is already invited to this plan.", "error")
+        else:
+            db.plans.update_one(
+                {"_id": plan["_id"]}, {"$addToSet": {"invited_member_ids": member_id}}
+            )
+            flash(f"{member['display_name']} was invited to the plan.", "success")
+        return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+
     @app.post("/plans/<plan_id>/rsvp")
     def update_rsvp(plan_id):
         db = require_database()
@@ -752,47 +861,69 @@ def create_app(database_override=None):
         if not group:
             abort(404)
         member_id = object_id(request.form.get("member_id"))
-        if member_id not in group.get("member_ids", []):
+        if member_id not in plan_member_ids(plan, group):
             abort(404)
 
         status = request.form.get("status", "").strip()
-        allowed_statuses = {"attending", "not_attending", "arriving_late", "leaving_early"}
+        allowed_statuses = {
+            "attending", "not_attending", "arriving_late", "leaving_early",
+            "arriving_late_leaving_early",
+        }
         if status not in allowed_statuses:
             flash("Please choose a valid RSVP response.", "error")
             return redirect(url_for("plan_detail", plan_id=plan["_id"]))
 
-        response = {"status": status, "updated_at": utc_now()}
-        if status in {"arriving_late", "leaving_early"}:
-            response_time = request.form.get("response_time", "").strip()
-            try:
-                time_minutes = parse_time(response_time)
-            except ValueError:
-                flash("A valid arrival or departure time is required.", "error")
-                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+        scheduled_start = as_datetime(plan["scheduled_start"])
+        scheduled_end = as_datetime(plan["scheduled_end"])
 
-            scheduled_start = plan["scheduled_start"]
-            scheduled_end = plan["scheduled_end"]
-            if isinstance(scheduled_start, str):
-                scheduled_start = datetime.fromisoformat(scheduled_start)
-            if isinstance(scheduled_end, str):
-                scheduled_end = datetime.fromisoformat(scheduled_end)
-            response_datetime = datetime.combine(
+        def response_datetime(field_name, legacy=False):
+            value = request.form.get(field_name, "").strip()
+            if not value and legacy:
+                value = request.form.get("response_time", "").strip()
+            try:
+                time_minutes = parse_time(value)
+            except ValueError:
+                return value, None
+            value_datetime = datetime.combine(
                 scheduled_start.date(), datetime.min.time()
             ).replace(hour=time_minutes // 60, minute=time_minutes % 60)
-            valid_time = (
-                scheduled_start < response_datetime <= scheduled_end
-                if status == "arriving_late"
-                else scheduled_start <= response_datetime < scheduled_end
-            )
-            if not valid_time:
-                message = (
-                    "Arrival time must be after the start and no later than the event end."
-                    if status == "arriving_late"
-                    else "Departure time must be no earlier than the start and before the event end."
-                )
-                flash(message, "error")
+            return value, value_datetime
+
+        response = {"status": status, "updated_at": utc_now()}
+        if status == "arriving_late":
+            arrival_time, arrival = response_datetime("arrival_time", legacy=True)
+            if not arrival:
+                flash("A valid arrival time is required.", "error")
                 return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            response["time"] = response_time
+            if not scheduled_start < arrival < scheduled_end:
+                flash("Arrival time must be after the start and before the event end.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            response.update({"arrival_time": arrival_time, "time": arrival_time})
+        elif status == "leaving_early":
+            departure_time, departure = response_datetime("departure_time", legacy=True)
+            if not departure:
+                flash("A valid departure time is required.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            if not scheduled_start < departure < scheduled_end:
+                flash(
+                    "Departure time must be no earlier than the first valid option and before the event end.",
+                    "error",
+                )
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            response.update({"departure_time": departure_time, "time": departure_time})
+        elif status == "arriving_late_leaving_early":
+            arrival_time, arrival = response_datetime("arrival_time")
+            departure_time, departure = response_datetime("departure_time")
+            if not arrival or not departure:
+                flash("Valid arrival and departure times are required.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            if not scheduled_start < arrival < departure < scheduled_end:
+                flash(
+                    "Arrival and departure must be inside the event, with arrival before departure.",
+                    "error",
+                )
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            response.update({"arrival_time": arrival_time, "departure_time": departure_time})
 
         db.plans.update_one(
             {"_id": plan["_id"]},

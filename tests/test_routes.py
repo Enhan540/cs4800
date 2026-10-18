@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import mongomock
 import pytest
@@ -346,8 +346,9 @@ def test_plan_actions_are_ordered_for_planning_and_scheduled_states(app_and_db):
         "scheduled_total_members": 0,
     }})
     scheduled_page = client.get(f"/plans/{plan_id}").get_data(as_text=True)
-    assert scheduled_page.index("Edit Plan") < scheduled_page.index("Reschedule")
-    assert scheduled_page.index("Reschedule") < scheduled_page.index("Delete Plan")
+    assert scheduled_page.index("Edit Plan") < scheduled_page.index("Delete Plan")
+    assert "Reschedule" not in scheduled_page
+    assert "Schedule this time" not in scheduled_page
 
 
 def test_group_page_separates_planning_and_scheduled_plans_without_duplicates(app_and_db):
@@ -367,7 +368,7 @@ def test_group_page_separates_planning_and_scheduled_plans_without_duplicates(ap
 
     page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
 
-    assert "Scheduled Plans" in page
+    assert "Upcoming Plans" in page
     assert "Planning" in page
     assert page.count("Confirmed Event") == 1
     assert page.count("Needs A Time") == 1
@@ -639,7 +640,7 @@ def test_plan_creation_and_opening_generate_matches_automatically(app_and_db):
     assert database.plans.find_one({"_id": created["_id"]})["matches"]
 
 
-def test_dashboard_separates_upcoming_and_needs_planning_with_group_names(app_and_db):
+def test_dashboard_shows_upcoming_but_not_global_planning_with_group_names(app_and_db):
     app, database = app_and_db
     group_id = make_group(database, name="College Friends")
     make_plan(database, group_id, title="Beach Trip")
@@ -651,8 +652,225 @@ def test_dashboard_separates_upcoming_and_needs_planning_with_group_names(app_an
 
     page = app.test_client().get("/").get_data(as_text=True)
 
-    assert "Upcoming" in page
-    assert "Needs Planning" in page
+    assert "Upcoming Plans" in page
+    assert "Needs Planning" not in page
     assert "Movie Night" in page
-    assert "Beach Trip" in page
+    assert "Beach Trip" not in page
     assert page.count("College Friends") >= 2
+
+
+def make_six_to_ten_plan(database):
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    plan_id = make_plan(
+        database,
+        group_id,
+        status="scheduled",
+        scheduled_start=datetime(2026, 10, 23, 18, 0),
+        scheduled_end=datetime(2026, 10, 23, 22, 0),
+        invited_member_ids=[member_id],
+        rsvps={},
+    )
+    return group_id, plan_id, member_id
+
+
+@pytest.mark.parametrize(
+    ("response_time", "accepted"),
+    [("17:45", False), ("18:30", True), ("21:30", True), ("22:15", False)],
+)
+def test_arrival_time_must_be_strictly_inside_event(app_and_db, response_time, accepted):
+    app, database = app_and_db
+    _group_id, plan_id, member_id = make_six_to_ten_plan(database)
+
+    app.test_client().post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id),
+        "status": "arriving_late",
+        "arrival_time": response_time,
+    })
+    response = database.plans.find_one({"_id": plan_id})["rsvps"].get(str(member_id))
+
+    assert (response is not None) is accepted
+    if accepted:
+        assert response["arrival_time"] == response_time
+
+
+@pytest.mark.parametrize(
+    ("response_time", "accepted"),
+    [("17:45", False), ("19:00", True), ("22:15", False)],
+)
+def test_departure_time_must_be_strictly_inside_event(app_and_db, response_time, accepted):
+    app, database = app_and_db
+    _group_id, plan_id, member_id = make_six_to_ten_plan(database)
+
+    app.test_client().post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id),
+        "status": "leaving_early",
+        "departure_time": response_time,
+    })
+    response = database.plans.find_one({"_id": plan_id})["rsvps"].get(str(member_id))
+
+    assert (response is not None) is accepted
+    if accepted:
+        assert response["departure_time"] == response_time
+
+
+def test_combined_late_and_early_rsvp_validates_order_and_counts_as_attending(app_and_db):
+    app, database = app_and_db
+    _group_id, plan_id, member_id = make_six_to_ten_plan(database)
+    client = app.test_client()
+
+    response = client.post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id),
+        "status": "arriving_late_leaving_early",
+        "arrival_time": "19:00",
+        "departure_time": "21:00",
+    })
+    saved = database.plans.find_one({"_id": plan_id})["rsvps"][str(member_id)]
+    assert response.status_code == 302
+    assert saved["arrival_time"] == "19:00"
+    assert saved["departure_time"] == "21:00"
+
+    page = client.get(f"/plans/{plan_id}").get_data(as_text=True)
+    assert "1/1 attending" in page
+    assert "7:00 PM – 9:00 PM" in page
+    assert "1 Late &amp; Leaving Early" in page
+
+    invalid_plan_id = make_plan(
+        database,
+        database.plans.find_one({"_id": plan_id})["group_id"],
+        status="scheduled",
+        scheduled_start=datetime(2026, 10, 23, 18, 0),
+        scheduled_end=datetime(2026, 10, 23, 22, 0),
+        invited_member_ids=[member_id],
+        rsvps={},
+    )
+    invalid = client.post(
+        f"/plans/{invalid_plan_id}/rsvp",
+        data={
+            "member_id": str(member_id),
+            "status": "arriving_late_leaving_early",
+            "arrival_time": "21:00",
+            "departure_time": "20:00",
+        },
+        follow_redirects=True,
+    )
+    assert b"arrival before departure" in invalid.data
+    assert database.plans.find_one({"_id": invalid_plan_id})["rsvps"] == {}
+
+
+def test_rsvp_page_offers_only_dynamic_fifteen_minute_event_times(app_and_db):
+    app, database = app_and_db
+    _group_id, plan_id, _member_id = make_six_to_ten_plan(database)
+
+    page = app.test_client().get(f"/plans/{plan_id}").get_data(as_text=True)
+
+    assert 'value="18:15"' in page and "6:15 PM</option>" in page
+    assert 'value="21:45"' in page and "9:45 PM</option>" in page
+    assert '<option value="18:00">' not in page
+    assert '<option value="22:00">' not in page
+    assert 'type="time"' not in page
+
+
+def test_scheduled_page_prioritizes_confirmed_event_and_hides_candidate_results(app_and_db):
+    app, database = app_and_db
+    group_id, plan_id, member_id = make_six_to_ten_plan(database)
+    database.plans.update_one({"_id": plan_id}, {"$set": {
+        "title": "Movie Night",
+        "duration_minutes": 300,
+        "matches": [matching_time([member_id])],
+        "match_type": "exact",
+    }})
+
+    page = app.test_client().get(f"/plans/{plan_id}").get_data(as_text=True)
+
+    assert page.index("Movie Night") < page.index("Friday, October 23, 2026")
+    assert "6:00 PM – 10:00 PM" in page
+    assert "· 4 hours" in page
+    assert "Scheduling Requirements" in page
+    assert "Best Times" not in page
+    assert "Closest Available Options" not in page
+    assert "Schedule this time" not in page
+    assert f'href="/groups/{group_id}"' in page
+
+
+def test_invite_existing_group_member_once(app_and_db):
+    app, database = app_and_db
+    invited_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    eligible_id = database.users.insert_one(
+        {"display_name": "Sam", "normalized_name": "sam"}
+    ).inserted_id
+    group_id = make_group(database, member_ids=[invited_id, eligible_id])
+    plan_id = make_plan(
+        database,
+        group_id,
+        status="scheduled",
+        scheduled_start=datetime(2026, 10, 23, 18, 0),
+        scheduled_end=datetime(2026, 10, 23, 22, 0),
+        invited_member_ids=[invited_id],
+        rsvps={},
+    )
+    client = app.test_client()
+
+    page = client.get(f"/plans/{plan_id}").get_data(as_text=True)
+    assert "+ Invite Members" in page
+    assert f'value="{eligible_id}"' in page
+
+    client.post(f"/plans/{plan_id}/invite", data={"member_id": str(eligible_id)})
+    client.post(f"/plans/{plan_id}/invite", data={"member_id": str(eligible_id)})
+    plan = database.plans.find_one({"_id": plan_id})
+
+    assert plan["invited_member_ids"].count(eligible_id) == 1
+    refreshed = client.get(f"/plans/{plan_id}").get_data(as_text=True)
+    assert "Sam" in refreshed
+    assert "0/2 attending" in refreshed
+
+
+def test_group_hierarchy_and_upcoming_count_exclude_past_and_planning(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    now = datetime.now()
+    make_plan(database, group_id, title="Future Event", status="scheduled",
+              scheduled_start=now + timedelta(days=2), scheduled_end=now + timedelta(days=2, hours=2))
+    make_plan(database, group_id, title="Past Event", status="scheduled",
+              scheduled_start=now - timedelta(days=2), scheduled_end=now - timedelta(days=2, hours=-2))
+    make_plan(database, group_id, title="Still Planning")
+
+    page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
+
+    assert page.index("<h2>Upcoming Plans</h2>") < page.index("<h2>Members")
+    assert "Future Event" in page
+    assert "Past Event" not in page
+    assert "1 Upcoming Plan" in page
+    assert "Still Planning" in page
+    assert f'href="/plans/' in page
+
+
+def test_dashboard_has_clickable_groups_and_only_future_scheduled_plans(app_and_db):
+    app, database = app_and_db
+    group_id = make_group(database, name="Friday Friends")
+    now = datetime.now()
+    future_id = make_plan(
+        database, group_id, title="Future Movie", status="scheduled",
+        scheduled_start=now + timedelta(days=1), scheduled_end=now + timedelta(days=1, hours=2),
+    )
+    make_plan(
+        database, group_id, title="Past Movie", status="scheduled",
+        scheduled_start=now - timedelta(days=1), scheduled_end=now - timedelta(hours=1),
+    )
+    make_plan(database, group_id, title="Unconfirmed Movie")
+
+    page = app.test_client().get("/").get_data(as_text=True)
+
+    assert f'href="/groups/{group_id}"' in page
+    assert f'href="/plans/{future_id}"' in page
+    assert "Future Movie" in page
+    assert "Past Movie" not in page
+    assert "Unconfirmed Movie" not in page
+    assert "Needs Planning" not in page

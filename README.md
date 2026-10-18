@@ -16,11 +16,13 @@ Meetwise is a deployable first MVP for recurring group scheduling. It lets users
 - Safe POST-only deletion for plans and groups; group deletion preserves reusable members and availability
 - Group-aware member creation that automatically adds a new reusable member to the originating group
 - Editable group names and descriptions without changing members, plans, or group IDs
-- Separate **Scheduled Plans** and **Planning** sections on group pages
-- Dashboard sections for upcoming scheduled plans, plans needing attention, and groups
+- Separate **Upcoming Plans** and **Planning** sections on group pages, with past events excluded from upcoming counts
+- A focused dashboard containing upcoming scheduled plans and clickable group cards
 - Automatic best-time generation when a plan is created or opened
 - Debounced scheduling previews while plan fields are changed, without creating temporary plan records
-- Persistent per-member RSVP responses: attending, not attending, arriving late, or leaving early
+- Persistent per-member RSVP responses: attending, not attending, arriving late, leaving early, or both arriving late and leaving early
+- Dynamically generated 15-minute RSVP time choices constrained to the confirmed event
+- Plan participant invitations that reuse existing group members without duplicate records
 - RSVP attendance summaries on scheduled plans and plan cards
 - Flask validation, flash messages, and 404/500/503 pages
 - Pytest scheduling tests and GitHub Actions CI before EC2 deployment
@@ -58,6 +60,7 @@ Meetwise is a deployable first MVP for recurring group scheduling. It lets users
    MONGO_DB_NAME=cs4800_database
    SECRET_KEY=replace-with-a-long-random-value
    PORT=5000
+   APP_TIMEZONE=America/Los_Angeles
    ```
 
    `FLASK_SECRET_KEY` is still accepted as a backwards-compatible alternative to `SECRET_KEY`. Never commit `.env`.
@@ -80,7 +83,7 @@ MongoDB creates the four collections when data is first inserted. Availability d
 pytest -q
 ```
 
-The tests cover arbitrary 45/75/125/180-minute durations, shorter alternatives, minimum attendance, the required three-person overlap, deletion cleanup, plan lifecycle categorization, automatic previews, group editing, scheduling, RSVP validation and updates, dashboard organization, and group-aware member creation.
+The tests cover arbitrary 45/75/125/180-minute durations, shorter alternatives, minimum attendance, the required three-person overlap, deletion cleanup, plan lifecycle categorization, automatic previews, group editing, scheduling, constrained and combined RSVP responses, member invitations, upcoming filtering, dashboard organization, and group-aware member creation.
 
 ## Acceptance demo
 
@@ -93,9 +96,10 @@ The tests cover arbitrary 45/75/125/180-minute durations, shorter alternatives, 
 7. Choose an inclusive date range, a 120-minute duration, and minimum attendance of two or three.
 8. Confirm matching times appear automatically and update in the live preview when plan requirements change.
 9. Review the ranked results and attendance details, then schedule one result.
-10. Submit RSVP responses for several members, including an arrival or departure time.
-11. Confirm the plan moves from **Planning** to **Scheduled Plans** and appears under **Upcoming** on the dashboard.
-12. Refresh or restart Flask and confirm the scheduled time and RSVP responses remain.
+10. Submit RSVP responses for several members, including arrival, departure, and combined arrival/departure times.
+11. Add another member to the group and invite that existing member to the scheduled plan.
+12. Confirm the plan moves from **Planning** to **Upcoming Plans** and appears on the dashboard.
+13. Refresh or restart Flask and confirm the scheduled time and RSVP responses remain.
 
 ## Project structure
 

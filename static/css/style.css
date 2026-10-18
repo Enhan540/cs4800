@@ -96,6 +96,7 @@ tr:last-child td { border-bottom: 0; }
 .member-chip:hover { border-color: #9eb4e8; background: #f8faff; }
 .member-chip span { margin-top: .2rem; color: #3566d6; font-size: .75rem; font-weight: 700; }
 .member-note { margin: 1rem 0 0; }
+.upcoming-count { margin-left: .45rem; color: #66748a; font-size: .82rem; font-weight: 700; }
 .availability-matrix-wrapper { overflow-x: auto; }
 .availability-matrix { min-width: 960px; table-layout: fixed; }
 .availability-matrix th, .availability-matrix td { padding: .85rem .7rem; vertical-align: top; }
@@ -142,6 +143,14 @@ tr:last-child td { border-bottom: 0; }
 .plan-card-date { margin: .5rem 0 .2rem; font-weight: 750; }
 .plan-card-time { margin: 0 0 .65rem; color: #2854ba; font-size: 1.1rem; font-weight: 800; }
 .best-match { display: flex; flex-direction: column; gap: .18rem; border-top: 1px solid #edf0f5; padding-top: .75rem; font-size: .85rem; }
+.upcoming-section { margin-top: 0; }
+.clickable-card { color: #172033; text-decoration: none; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+.clickable-card:hover, .clickable-card:focus-visible { border-color: #9eb4e8; box-shadow: 0 16px 36px #263b5b1a; transform: translateY(-2px); }
+.clickable-card:focus-visible { outline: 3px solid #dce6ff; }
+.card-title-link { color: #172033; text-decoration: none; }
+.card-title-link:hover { color: #2854ba; }
+.group-context, .group-card-count { margin: .1rem 0 .55rem; color: #315dbf; font-size: .85rem; font-weight: 750; }
+.group-card-count { margin-top: auto; }
 .dashboard-section:first-of-type { margin-top: 0; }
 .schedule-preview { margin: 1.5rem 0; border-top: 1px solid #e3e9f2; padding-top: 1.25rem; }
 .schedule-preview h2 { margin-bottom: .35rem; }
@@ -150,6 +159,24 @@ tr:last-child td { border-bottom: 0; }
 .preview-badge { border-radius: 999px; background: #e7f6ec; color: #18723a; padding: .2rem .45rem; font-size: .68rem; font-weight: 800; white-space: nowrap; }
 .preview-badge.alternative { background: #fff1dc; color: #8a4d14; }
 .attendance-total { color: #18723a; }
+.scheduled-event-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 1.5rem; padding: 1.2rem 0 1.5rem; }
+.scheduled-event-heading h1 { margin-bottom: .75rem; }
+.confirmed-date { margin: 0 0 .25rem; font-size: clamp(1.25rem, 3vw, 1.65rem); font-weight: 800; }
+.confirmed-time { margin: 0; color: #2854ba; font-size: clamp(1.15rem, 2.5vw, 1.45rem); font-weight: 800; }
+.confirmed-time span { color: #66748a; font-size: .9em; font-weight: 650; }
+.scheduled-actions { flex: 0 0 auto; }
+.rsvp-overview { display: flex; align-items: center; justify-content: space-between; gap: 1.25rem; margin-bottom: 1rem; }
+.rsvp-overview .attendance-total { display: block; font-size: 1.15rem; }
+.compact-rsvp-summary { margin: .3rem 0 0; color: #66748a; font-size: .82rem; }
+.invite-details { position: relative; flex: 0 0 auto; }
+.invite-details summary { list-style: none; }
+.invite-details summary::-webkit-details-marker { display: none; }
+.invite-form { position: absolute; z-index: 3; top: calc(100% + .55rem); right: 0; width: min(340px, calc(100vw - 3rem)); border: 1px solid #d8e0ec; border-radius: 12px; box-shadow: 0 15px 35px #17203324; background: white; padding: 1rem; }
+.invite-form label { margin-bottom: .75rem; }
+.button:disabled { cursor: not-allowed; opacity: .55; }
+.plan-details { margin-bottom: 1rem; padding: 1rem 1.25rem; }
+.plan-details > summary { cursor: pointer; color: #52617a; font-weight: 800; }
+.compact-plan-summary { margin-top: 1rem; box-shadow: none; padding: 0; }
 .rsvp-counts { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
 .rsvp-counts span { border-radius: 999px; background: #edf2ff; color: #315dbf; padding: .35rem .65rem; font-size: .75rem; font-weight: 750; }
 .rsvp-list { display: grid; gap: .7rem; }
@@ -158,8 +185,8 @@ tr:last-child td { border-bottom: 0; }
 .rsvp-status { color: #52617a; font-size: .82rem; font-weight: 700; }
 .status-attending { color: #18723a; }
 .status-not_attending { color: #a42b20; }
-.status-arriving_late, .status-leaving_early { color: #8a4d14; }
-.rsvp-form { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: .65rem; }
+.status-arriving_late, .status-leaving_early, .status-arriving_late_leaving_early { color: #8a4d14; }
+.rsvp-form { display: grid; grid-template-columns: 1.1fr .8fr .8fr auto; align-items: end; gap: .65rem; }
 .rsvp-form label { margin: 0; }
 .rsvp-form .button { white-space: nowrap; }
 .rsvp-time-field[hidden] { display: none; }
@@ -170,6 +197,9 @@ tr:last-child td { border-bottom: 0; }
   .plan-summary div:nth-child(2) { border-right: 0; }
   .page-heading { align-items: start; flex-direction: column; padding-top: 3rem; }
   .page-heading.with-back-link { padding-top: 1.2rem; }
+  .scheduled-event-heading { align-items: flex-start; flex-direction: column; }
+  .rsvp-overview { align-items: flex-start; flex-direction: column; }
+  .invite-form { right: auto; left: 0; }
   .member-heading { align-items: stretch; flex-direction: column; }
   .compact-actions { width: 100%; }
   .compact-actions > * { flex: 1 1 200px; }
@@ -178,7 +208,7 @@ tr:last-child td { border-bottom: 0; }
   .availability-row { align-items: stretch; flex-direction: column; }
   .preview-result { grid-template-columns: 1fr 1fr; }
   .rsvp-row { grid-template-columns: 1fr; }
-  .rsvp-form { grid-template-columns: 1fr 1fr auto; }
+  .rsvp-form { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 520px) {
   .header-content { align-items: flex-start; flex-direction: column; padding: 1rem 0; }

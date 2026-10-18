@@ -2,21 +2,52 @@
 {% block title %}{{ plan.title }} | Meetwise{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
-<section class="page-heading with-back-link">
-  <div><p class="eyebrow">{{ group.name }} · {{ plan.status|title }}</p><h1>{{ plan.title }}</h1><p class="muted">{{ plan.start_date }} through {{ plan.end_date }}</p></div>
-  <div class="button-row heading-actions">
-    <a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Edit Plan</a>
-    <form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}" {% if plan.status == 'scheduled' %}data-confirm="Rescheduling clears the selected time and existing RSVPs. Continue?"{% endif %}><button class="button" type="submit">{% if plan.status == 'scheduled' %}Reschedule{% else %}Find Matching Times{% endif %}</button></form>
-    <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this plan and its saved results?"><button class="button danger" type="submit">Delete Plan</button></form>
-  </div>
-</section>
 
 {% if plan.status == 'scheduled' and plan.scheduled_start and plan.scheduled_end %}
-  <section class="content-section rsvp-section">
-    <div class="section-heading"><div><h2>Attendance</h2><p class="muted small section-subtitle">Members can update their RSVP at any time.</p></div><strong class="attendance-total">{{ rsvp.counts.overall_attending }}/{{ rsvp.rows|length }} attending</strong></div>
-    <div class="rsvp-counts" aria-label="RSVP counts">
-      <span>{{ rsvp.counts.attending }} Attending</span><span>{{ rsvp.counts.arriving_late }} Arriving Late</span><span>{{ rsvp.counts.leaving_early }} Leaving Early</span><span>{{ rsvp.counts.not_attending }} Not Attending</span><span>{{ rsvp.counts.no_response }} No Response</span>
+  <section class="scheduled-event-heading">
+    <div>
+      <p class="eyebrow">Scheduled · {{ group.name }}</p>
+      <h1>{{ plan.title }}</h1>
+      <p class="confirmed-date">{{ plan.scheduled_start|date_long }}</p>
+      <p class="confirmed-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }} <span>· {{ plan|event_duration }}</span></p>
     </div>
+    <div class="button-row heading-actions scheduled-actions">
+      <a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Edit Plan</a>
+      <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this scheduled plan and all RSVP responses?"><button class="button danger" type="submit">Delete Plan</button></form>
+    </div>
+  </section>
+
+  <section class="card rsvp-overview">
+    <div>
+      <strong class="attendance-total">{{ rsvp.counts.overall_attending }}/{{ rsvp.rows|length }} attending</strong>
+      <p class="compact-rsvp-summary">
+        {{ rsvp.counts.attending }} Attending · {{ rsvp.counts.arriving_late }} Late · {{ rsvp.counts.leaving_early }} Leaving Early · {{ rsvp.counts.arriving_late_leaving_early }} Late &amp; Leaving Early · {{ rsvp.counts.not_attending }} Not Attending · {{ rsvp.counts.no_response }} Pending
+      </p>
+    </div>
+    {% if eligible_invitees %}
+      <details class="invite-details">
+        <summary class="button secondary">+ Invite Members</summary>
+        <form method="post" action="{{ url_for('invite_plan_member', plan_id=plan._id) }}" class="invite-form">
+          <label for="invite_member_id">Group member<select id="invite_member_id" name="member_id" required><option value="">Select a member</option>{% for member in eligible_invitees %}<option value="{{ member._id }}">{{ member.display_name }}</option>{% endfor %}</select></label>
+          <button class="button" type="submit">Invite</button>
+        </form>
+      </details>
+    {% else %}<button class="button secondary" type="button" disabled title="All group members are already invited">+ Invite Members</button>{% endif %}
+  </section>
+
+  <details class="plan-details card">
+    <summary>Scheduling Requirements</summary>
+    <div class="plan-summary compact-plan-summary">
+      <div><strong>{{ plan.duration_minutes|duration_label }}</strong><span>Requested duration</span></div>
+      <div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div>
+      <div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div>
+      <div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
+    </div>
+    {% if plan.scheduled_is_shorter %}<div class="shorter-warning"><strong>Shorter option selected</strong><span>Requested duration: {{ plan.duration_minutes|duration_label }} · Scheduled duration: {{ plan|event_duration }}</span></div>{% endif %}
+  </details>
+
+  <section class="content-section rsvp-section">
+    <div class="section-heading"><div><h2>Attendance</h2><p class="muted small section-subtitle">Each invited member can update their RSVP.</p></div></div>
     {% if rsvp.rows %}
       <div class="rsvp-list">
         {% for row in rsvp.rows %}
@@ -26,8 +57,9 @@
               <span class="rsvp-status status-{{ row.status }}">
                 {% if row.status == 'attending' %}✓ Attending
                 {% elif row.status == 'not_attending' %}✕ Not Attending
-                {% elif row.status == 'arriving_late' %}◷ Arriving at {{ row.time|time12 }}
-                {% elif row.status == 'leaving_early' %}◷ Leaving at {{ row.time|time12 }}
+                {% elif row.status == 'arriving_late' %}◷ Arriving at {{ row.arrival_time|time12 }}
+                {% elif row.status == 'leaving_early' %}◷ Leaving at {{ row.departure_time|time12 }}
+                {% elif row.status == 'arriving_late_leaving_early' %}◷ {{ row.arrival_time|time12 }} – {{ row.departure_time|time12 }}
                 {% else %}— No Response{% endif %}
               </span>
             </div>
@@ -38,52 +70,49 @@
                 <option value="not_attending" {% if row.status == 'not_attending' %}selected{% endif %}>Not Attending</option>
                 <option value="arriving_late" {% if row.status == 'arriving_late' %}selected{% endif %}>Arriving Late</option>
                 <option value="leaving_early" {% if row.status == 'leaving_early' %}selected{% endif %}>Leaving Early</option>
+                <option value="arriving_late_leaving_early" {% if row.status == 'arriving_late_leaving_early' %}selected{% endif %}>Arriving Late &amp; Leaving Early</option>
               </select></label>
-              <label class="rsvp-time-field" data-rsvp-time-field>Arrival/departure time<input name="response_time" type="time" value="{{ row.time or '' }}" min="{{ plan.scheduled_start.strftime('%H:%M') }}" max="{{ plan.scheduled_end.strftime('%H:%M') }}" data-rsvp-time></label>
+              <label class="rsvp-time-field" data-rsvp-arrival-field>Arrival<select name="arrival_time" data-rsvp-arrival><option value="">Select arrival</option>{% for value in event_time_options %}<option value="{{ value }}" {% if row.arrival_time == value %}selected{% endif %}>{{ value|time12 }}</option>{% endfor %}</select></label>
+              <label class="rsvp-time-field" data-rsvp-departure-field>Leaving<select name="departure_time" data-rsvp-departure><option value="">Select departure</option>{% for value in event_time_options %}<option value="{{ value }}" {% if row.departure_time == value %}selected{% endif %}>{{ value|time12 }}</option>{% endfor %}</select></label>
               <button class="button secondary" type="submit">Save RSVP</button>
             </form>
           </article>
         {% endfor %}
       </div>
-    {% else %}<div class="card empty-state compact"><p>Add members to the group to collect RSVPs.</p></div>{% endif %}
+    {% else %}<div class="card empty-state compact"><p>Invite a group member to collect RSVPs.</p></div>{% endif %}
   </section>
-{% endif %}
 
-{% if plan.status == 'scheduled' and plan.scheduled_start and plan.scheduled_end %}
-  <section class="scheduled-summary card">
-    <p class="scheduled-label">Scheduled</p>
-    <h2>{{ plan.scheduled_start|date_long }}</h2>
-    <p class="scheduled-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }}</p>
-    <p><strong>{{ plan.scheduled_attendance_count }}/{{ plan.scheduled_total_members }}</strong> members available</p>
-    <p class="scheduled-members"><strong>Available:</strong> {% for member_id in plan.scheduled_available_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
-    {% if plan.scheduled_is_shorter %}<div class="shorter-warning"><strong>Shorter option selected</strong><span>Requested duration: {{ plan.duration_minutes|duration_label }} · Selected duration: {{ plan.scheduled_available_duration_minutes|duration_label }}</span></div>{% endif %}
-  </section>
-{% endif %}
-
-<section class="plan-summary card">
-  <div><strong>{{ plan.duration_minutes }}</strong><span>Requested minutes</span></div><div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div><div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div><div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
-</section>
-
-<section class="content-section"><div class="section-heading"><h2>{% if plan.match_type == 'alternative' %}Closest Available Options{% else %}Best Times{% endif %}</h2>{% if plan.matches_generated_at %}<span class="muted small">Automatically calculated {{ plan.matches_generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}</div>
-  {% if plan.match_type == 'alternative' %}<div class="result-notice"><strong>No {{ plan.duration_minutes|duration_label }} time window was found.</strong><span>The shorter options below still meet the minimum attendance requirement.</span></div>{% endif %}
-  {% if plan.matches %}
-    <div class="match-list">
-      {% for match in plan.matches %}
-        {% set exact = match.is_exact|default(true) %}
-        <article class="card match-card">
-          <div class="match-rank">{{ loop.index }}</div>
-          <div class="match-main"><span class="match-badge {% if not exact %}alternative{% endif %}">{% if exact %}Exact match{% else %}Shorter alternative{% endif %}</span><h3>{{ match.day }}, {{ match.date }}</h3><p>{{ match.start_time|time12 }} – {{ match.end_time|time12 }}</p>{% if not exact %}<p class="available-duration">Available duration: {{ match.available_duration_minutes|duration_label }}</p>{% endif %}</div>
-          <div class="attendance"><strong>{{ match.attendance_count }}/{{ match.total_members }}</strong><span>available</span></div>
-          <div class="match-members"><p><strong>Available:</strong> {% for member_id in match.available_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% if match.unavailable_member_ids %}<p class="muted"><strong>Unavailable:</strong> {% for member_id in match.unavailable_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}</div>
-          <form class="match-action" method="post" action="{{ url_for('schedule_plan', plan_id=plan._id) }}" {% if not exact %}data-confirm="Requested duration: {{ plan.duration_minutes|duration_label }}. Selected available duration: {{ match.available_duration_minutes|duration_label }}. Schedule this shorter option?"{% endif %}>
-            <input type="hidden" name="match_index" value="{{ loop.index0 }}">
-            {% if not exact %}<input type="hidden" name="confirm_shorter" value="yes">{% endif %}
-            <button class="button {% if not exact %}secondary{% endif %}" type="submit">Schedule this {% if not exact %}shorter option{% else %}time{% endif %}</button>
-          </form>
-        </article>
-      {% endfor %}
+{% else %}
+  <section class="page-heading with-back-link">
+    <div><p class="eyebrow">{{ group.name }} · Planning</p><h1>{{ plan.title }}</h1><p class="muted">{{ plan.start_date }} through {{ plan.end_date }}</p></div>
+    <div class="button-row heading-actions">
+      <a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Edit Plan</a>
+      <form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}"><button class="button" type="submit">Find Matching Times</button></form>
+      <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this plan and its saved results?"><button class="button danger" type="submit">Delete Plan</button></form>
     </div>
-  {% elif plan.matches_generated_at %}<div class="card empty-state"><h2>No matching times were found</h2><p>The minimum attendance requirement could not be met. Try changing the plan or adding more availability.</p></div>
-  {% else %}<div class="card empty-state"><h2>No options yet</h2><p>Add availability or adjust the plan requirements to find a matching time.</p></div>{% endif %}
-</section>
+  </section>
+
+  <section class="plan-summary card">
+    <div><strong>{{ plan.duration_minutes }}</strong><span>Requested minutes</span></div><div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div><div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div><div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
+  </section>
+
+  <section class="content-section"><div class="section-heading"><h2>{% if plan.match_type == 'alternative' %}Closest Available Options{% else %}Best Times{% endif %}</h2>{% if plan.matches_generated_at %}<span class="muted small">Automatically calculated {{ plan.matches_generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}</div>
+    {% if plan.match_type == 'alternative' %}<div class="result-notice"><strong>No {{ plan.duration_minutes|duration_label }} time window was found.</strong><span>The shorter options below still meet the minimum attendance requirement.</span></div>{% endif %}
+    {% if plan.matches %}
+      <div class="match-list">
+        {% for match in plan.matches %}
+          {% set exact = match.is_exact|default(true) %}
+          <article class="card match-card">
+            <div class="match-rank">{{ loop.index }}</div>
+            <div class="match-main"><span class="match-badge {% if not exact %}alternative{% endif %}">{% if exact %}Exact match{% else %}Shorter alternative{% endif %}</span><h3>{{ match.day }}, {{ match.date }}</h3><p>{{ match.start_time|time12 }} – {{ match.end_time|time12 }}</p>{% if not exact %}<p class="available-duration">Available duration: {{ match.available_duration_minutes|duration_label }}</p>{% endif %}</div>
+            <div class="attendance"><strong>{{ match.attendance_count }}/{{ match.total_members }}</strong><span>available</span></div>
+            <div class="match-members"><p><strong>Available:</strong> {% for member_id in match.available_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% if match.unavailable_member_ids %}<p class="muted"><strong>Unavailable:</strong> {% for member_id in match.unavailable_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}</div>
+            <form class="match-action" method="post" action="{{ url_for('schedule_plan', plan_id=plan._id) }}" {% if not exact %}data-confirm="Requested duration: {{ plan.duration_minutes|duration_label }}. Selected available duration: {{ match.available_duration_minutes|duration_label }}. Schedule this shorter option?"{% endif %}><input type="hidden" name="match_index" value="{{ loop.index0 }}">{% if not exact %}<input type="hidden" name="confirm_shorter" value="yes">{% endif %}<button class="button {% if not exact %}secondary{% endif %}" type="submit">Schedule this {% if not exact %}shorter option{% else %}time{% endif %}</button></form>
+          </article>
+        {% endfor %}
+      </div>
+    {% elif plan.matches_generated_at %}<div class="card empty-state"><h2>No matching times were found</h2><p>The minimum attendance requirement could not be met. Try changing the plan or adding more availability.</p></div>
+    {% else %}<div class="card empty-state"><h2>No options yet</h2><p>Add availability or adjust the plan requirements to find a matching time.</p></div>{% endif %}
+  </section>
+{% endif %}
 {% endblock %}
