@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ group.name }} | Meetwise{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">Group</p><h1>{{ group.name }}</h1><p class="muted">{{ group.description or 'No description added.' }}</p></div>
+  <div class="button-row heading-actions">
+    <a class="button" href="{{ url_for('create_plan', group_id=group._id) }}">Create plan</a>
+    <form method="post" action="{{ url_for('delete_group', group_id=group._id) }}" data-confirm="Delete this group and all of its plans? Members and their availability will be kept."><button class="button danger" type="submit">Delete group</button></form>
+  </div>
+</section>
+
+<div class="two-column">
+  <section class="card">
+    <h2>Members <span class="count">{{ members|length }}</span></h2>
+    {% if members %}
+      <div class="item-list">
+        {% for member in members %}
+          <a class="list-item" href="{{ url_for('member_availability', user_id=member._id) }}"><span><strong>{{ member.display_name }}</strong><small>{{ member.email or 'No email' }}</small></span><span>Edit availability →</span></a>
+        {% endfor %}
+      </div>
+    {% else %}<p class="muted">Add at least one member before creating a plan.</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Add existing member</h2>
+    {% if available_users %}
+      <form method="post" action="{{ url_for('add_group_member', group_id=group._id) }}">
+        <label for="user_id">Existing member<select id="user_id" name="user_id" required><option value="">Choose a member</option>{% for user in available_users %}<option value="{{ user._id }}">{{ user.display_name }}</option>{% endfor %}</select></label>
+        <button class="button" type="submit">Add to group</button>
+      </form>
+    {% else %}<p class="muted">Every existing member is already in this group.</p>{% endif %}
+    <a class="text-link standalone-link" href="{{ url_for('users', group_id=group._id) }}">Create new member and add to group →</a>
+  </section>
+</div>
+
+<section class="content-section">
+  <div class="section-heading"><h2>Group availability</h2></div>
+  {% if entries %}
+    <div class="table-wrapper"><table><thead><tr><th>Member</th><th>Day</th><th>Start</th><th>End</th></tr></thead><tbody>
+      {% for entry in entries %}<tr><td>{{ entry.member.display_name if entry.member else 'Unknown member' }}</td><td>{{ entry.day }}</td><td>{{ entry.start_time|time12 }}</td><td>{{ entry.end_time|time12 }}</td></tr>{% endfor %}
+    </tbody></table></div>
+  {% else %}<div class="card empty-state compact"><p>No availability has been added for this group yet.</p></div>{% endif %}
+</section>
+
+<section class="content-section">
+  <div class="section-heading"><h2>Plans</h2><a href="{{ url_for('create_plan', group_id=group._id) }}">Create plan</a></div>
+  {% if plans %}<div class="item-list card">{% for plan in plans %}<a class="list-item" href="{{ url_for('plan_detail', plan_id=plan._id) }}"><span><strong>{{ plan.title }}</strong><small>{{ plan.start_date }} to {{ plan.end_date }} · {{ plan.status|title }}</small></span><span>Open →</span></a>{% endfor %}</div>{% else %}<p class="muted">No plans yet.</p>{% endif %}
+</section>
+{% endblock %}

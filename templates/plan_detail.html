@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ plan.title }} | Meetwise{% endblock %}
+{% block content %}
+<section class="page-heading"><div><p class="eyebrow">{{ group.name }} · {{ plan.status|title }}</p><h1>{{ plan.title }}</h1><p class="muted">{{ plan.start_date }} through {{ plan.end_date }}</p></div><div class="button-row heading-actions"><form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}"><button class="button" type="submit">Find matching times</button></form><form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this plan and its saved results?"><button class="button danger" type="submit">Delete plan</button></form></div></section>
+<section class="plan-summary card">
+  <div><strong>{{ plan.duration_minutes }}</strong><span>Minutes</span></div><div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div><div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div><div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
+</section>
+<section class="content-section"><div class="section-heading"><h2>{% if plan.match_type == 'alternative' %}Closest available options{% else %}Ranked matches{% endif %}</h2>{% if plan.matches_generated_at %}<span class="muted small">Last calculated {{ plan.matches_generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}</div>
+  {% if plan.match_type == 'alternative' %}<div class="result-notice"><strong>No {{ plan.duration_minutes|duration_label }} time window was found.</strong><span>The shorter options below still meet the minimum attendance requirement.</span></div>{% endif %}
+  {% if plan.matches %}
+    <div class="match-list">
+      {% for match in plan.matches %}
+        {% set exact = match.is_exact|default(true) %}
+        <article class="card match-card">
+          <div class="match-rank">{{ loop.index }}</div>
+          <div class="match-main"><span class="match-badge {% if not exact %}alternative{% endif %}">{% if exact %}Exact match{% else %}Shorter alternative{% endif %}</span><h3>{{ match.day }}, {{ match.date }}</h3><p>{{ match.start_time|time12 }} – {{ match.end_time|time12 }}</p>{% if not exact %}<p class="available-duration">Available duration: {{ match.available_duration_minutes|duration_label }}</p>{% endif %}</div>
+          <div class="attendance"><strong>{{ match.attendance_count }}/{{ match.total_members }}</strong><span>available</span></div>
+          <div class="match-members"><p><strong>Available:</strong> {% for member_id in match.available_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% if match.unavailable_member_ids %}<p class="muted"><strong>Unavailable:</strong> {% for member_id in match.unavailable_member_ids %}{% set member = member_map.get(member_id|string) %}{{ member.display_name if member else 'Unknown' }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}</div>
+        </article>
+      {% endfor %}
+    </div>
+  {% elif plan.matches_generated_at %}<div class="card empty-state"><h2>No matching times were found</h2><p>The minimum attendance requirement could not be met. Try changing the plan or adding more availability.</p></div>
+  {% else %}<div class="card empty-state"><h2>Ready to search</h2><p>Run the time finder to calculate the best overlaps for this group.</p></div>{% endif %}
+</section>
+<a class="text-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
+{% endblock %}

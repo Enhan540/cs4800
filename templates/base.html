@@ -3,23 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}CS4800 Availability{% endblock %}</title>
+  <title>{% block title %}Meetwise{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
   <header class="site-header">
     <div class="container header-content">
-      <a class="brand" href="{{ url_for('index') }}">CS4800 Availability</a>
-      <nav><a href="{{ url_for('results') }}">View submissions</a></nav>
+      <a class="brand" href="{{ url_for('index') }}">Meetwise</a>
+      <nav aria-label="Main navigation">
+        <a href="{{ url_for('index') }}">Dashboard</a>
+        <a href="{{ url_for('groups') }}">Groups</a>
+        <a href="{{ url_for('users') }}">Members</a>
+      </nav>
     </div>
   </header>
-  <main class="container">
+  <main class="container page-shell">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         <div class="messages" aria-live="polite">
-          {% for category, message in messages %}
-            <p class="message {{ category }}">{{ message }}</p>
-          {% endfor %}
+          {% for category, message in messages %}<p class="message {{ category }}">{{ message }}</p>{% endfor %}
         </div>
       {% endif %}
     {% endwith %}

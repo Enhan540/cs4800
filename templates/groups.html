@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Groups | Meetwise{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">Your teams</p><h1>Groups</h1></div>
+  <a class="button" href="{{ url_for('create_group') }}">Create group</a>
+</section>
+{% if groups %}
+  <div class="card-grid">
+    {% for group in groups %}
+      <article class="card group-card">
+        <p class="pill">{{ group.member_ids|length }} members</p>
+        <h2>{{ group.name }}</h2>
+        <p class="muted">{{ group.description or 'No description added.' }}</p>
+        <a class="text-link" href="{{ url_for('group_detail', group_id=group._id) }}">Open group →</a>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  <section class="card empty-state"><h2>No groups yet</h2><p>Create your first recurring group to begin.</p><a class="button" href="{{ url_for('create_group') }}">Create group</a></section>
+{% endif %}
+{% endblock %}

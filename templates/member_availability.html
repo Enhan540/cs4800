@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ user.display_name }} availability | Meetwise{% endblock %}
+{% block content %}
+<section class="page-heading"><div><p class="eyebrow">Recurring weekly availability</p><h1>{{ user.display_name }}</h1><p class="muted">Add as many available windows per day as needed.</p></div><a class="button secondary" href="{{ url_for('users') }}">All members</a></section>
+<section class="card">
+  <h2>Add availability</h2>
+  <form method="post" class="inline-form">
+    <label for="day">Day<select id="day" name="day" required><option value="">Choose day</option>{% for day in days %}<option value="{{ day }}">{{ day }}</option>{% endfor %}</select></label>
+    <label for="start_time">Start<input id="start_time" name="start_time" type="time" required></label>
+    <label for="end_time">End<input id="end_time" name="end_time" type="time" required></label>
+    <button class="button" type="submit">Add window</button>
+  </form>
+</section>
+<section class="content-section">
+  <h2>Saved windows</h2>
+  {% if entries %}
+    <div class="availability-list">
+      {% for entry in entries %}
+        <article class="card availability-row">
+          <form method="post" action="{{ url_for('edit_availability', availability_id=entry._id) }}" class="inline-form grow">
+            <label>Day<select name="day" required>{% for day in days %}<option value="{{ day }}" {% if day == entry.day %}selected{% endif %}>{{ day }}</option>{% endfor %}</select></label>
+            <label>Start<input name="start_time" type="time" required value="{{ entry.start_time }}"></label>
+            <label>End<input name="end_time" type="time" required value="{{ entry.end_time }}"></label>
+            <button class="button secondary" type="submit">Save</button>
+          </form>
+          <form method="post" action="{{ url_for('delete_availability', availability_id=entry._id) }}" data-confirm="Delete this availability window?">
+            <button class="button danger" type="submit">Delete</button>
+          </form>
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}<div class="card empty-state compact"><p>No weekly availability saved yet.</p></div>{% endif %}
+</section>
+{% endblock %}

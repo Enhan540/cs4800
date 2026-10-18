@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Members | Meetwise{% endblock %}
+{% block content %}
+<section class="page-heading"><div><p class="eyebrow">People</p><h1>{% if origin_group %}Create a member for {{ origin_group.name }}{% else %}Members{% endif %}</h1><p class="muted">Members are global and can be reused across multiple groups.{% if origin_group %} This member will be added to {{ origin_group.name }} automatically.{% endif %}</p></div>{% if origin_group %}<a class="button secondary" href="{{ url_for('group_detail', group_id=origin_group._id) }}">Back to group</a>{% endif %}</section>
+<div class="two-column">
+  <section class="card">
+    <h2>Add a member</h2>
+    <form method="post" action="{{ url_for('users') }}">
+      {% if origin_group %}<input type="hidden" name="group_id" value="{{ origin_group._id }}">{% endif %}
+      <label for="display_name">Display name<input id="display_name" name="display_name" maxlength="100" required></label>
+      <label for="email">Email <span class="optional">optional</span><input id="email" name="email" type="email" maxlength="200"></label>
+      <button class="button" type="submit">{% if origin_group %}Create and add to group{% else %}Add member{% endif %}</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Current members</h2>
+    {% if users %}
+      <div class="item-list">
+        {% for user in users %}
+          <a class="list-item" href="{{ url_for('member_availability', user_id=user._id) }}">
+            <span><strong>{{ user.display_name }}</strong><small>{{ user.email or 'No email added' }}</small></span><span>Availability →</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}<p class="muted">No members yet.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

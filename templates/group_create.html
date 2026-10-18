@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Create group | Meetwise{% endblock %}
+{% block content %}
+<section class="narrow-page">
+  <p class="eyebrow">New group</p><h1>Create a recurring group</h1>
+  <section class="card">
+    <form method="post">
+      <label for="name">Group name<input id="name" name="name" maxlength="120" required value="{{ form.get('name', '') if form else '' }}"></label>
+      <label for="description">Description <span class="optional">optional</span><textarea id="description" name="description" rows="4" maxlength="500">{{ form.get('description', '') if form else '' }}</textarea></label>
+      <div class="button-row"><button class="button" type="submit">Create group</button><a class="button secondary" href="{{ url_for('groups') }}">Cancel</a></div>
+    </form>
+  </section>
+</section>
+{% endblock %}

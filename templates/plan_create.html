@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Create plan | Meetwise{% endblock %}
+{% block content %}
+<section class="narrow-page"><p class="eyebrow">{{ group.name }}</p><h1>Create a plan</h1>
+  <section class="card"><form method="post">
+    <label for="title">Plan title<input id="title" name="title" required maxlength="120" placeholder="Movie Night" value="{{ form.get('title', '') if form else '' }}"></label>
+    <div class="form-grid"><label for="start_date">Start date<input id="start_date" name="start_date" type="date" required value="{{ form.get('start_date', '') if form else '' }}"></label><label for="end_date">End date<input id="end_date" name="end_date" type="date" required value="{{ form.get('end_date', '') if form else '' }}"></label></div>
+    <div class="form-grid"><label for="duration_minutes">Duration in minutes<input id="duration_minutes" name="duration_minutes" type="number" min="1" required value="{{ form.get('duration_minutes', '120') if form else '120' }}"><span class="field-help">Any positive whole number, such as 45, 75, or 125.</span></label><label for="minimum_attendance">Minimum attendance<input id="minimum_attendance" name="minimum_attendance" type="number" min="1" max="{{ group.member_ids|length }}" required value="{{ form.get('minimum_attendance', group.member_ids|length) if form else group.member_ids|length }}"></label></div>
+    <div class="form-grid"><label for="earliest_time">Earliest allowed time <span class="optional">optional</span><input id="earliest_time" name="earliest_time" type="time" value="{{ form.get('earliest_time', '') if form else '' }}"></label><label for="latest_time">Latest allowed time <span class="optional">optional</span><input id="latest_time" name="latest_time" type="time" value="{{ form.get('latest_time', '') if form else '' }}"></label></div>
+    <p class="muted small">The finder checks start times in 30-minute increments and preserves the exact requested duration. If no full-duration match exists, it may show clearly labeled shorter alternatives.</p>
+    <div class="button-row"><button class="button" type="submit">Create plan</button><a class="button secondary" href="{{ url_for('group_detail', group_id=group._id) }}">Cancel</a></div>
+  </form></section>
+</section>
+{% endblock %}

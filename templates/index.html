@@ -1,34 +1,46 @@
 {% extends "base.html" %}
-{% block title %}Submit availability | CS4800{% endblock %}
+{% block title %}Dashboard | Meetwise{% endblock %}
 {% block content %}
 <section class="hero">
-  <p class="eyebrow">CS4800 group scheduling</p>
-  <h1>When are you available?</h1>
-  <p>Submit one availability window so your project group can see when participants are free.</p>
+  <p class="eyebrow">Recurring group scheduling</p>
+  <h1>Find a time that works.</h1>
+  <p>Create a group, save each member's weekly availability, and turn the overlap into a plan.</p>
+  <div class="button-row">
+    <a class="button" href="{{ url_for('create_group') }}">Create a group</a>
+    <a class="button secondary" href="{{ url_for('users') }}">Add members</a>
+  </div>
 </section>
-<section class="card">
-  <form id="availability-form" action="{{ url_for('submit') }}" method="post" novalidate>
-    <div class="form-grid">
-      <label for="name">Name
-        <input id="name" name="name" type="text" maxlength="100" required value="{{ form.get('name', '') if form else '' }}" autocomplete="name">
-      </label>
-      <label for="day">Day of the week
-        <select id="day" name="day" required>
-          <option value="">Choose a day</option>
-          {% for day in days %}
-            <option value="{{ day }}" {% if form and form.get('day') == day %}selected{% endif %}>{{ day }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label for="start_time">Start time
-        <input id="start_time" name="start_time" type="time" required value="{{ form.get('start_time', '') if form else '' }}">
-      </label>
-      <label for="end_time">End time
-        <input id="end_time" name="end_time" type="time" required value="{{ form.get('end_time', '') if form else '' }}">
-      </label>
-    </div>
-    <p id="form-error" class="form-error" role="alert"></p>
-    <button class="button" type="submit">Submit availability</button>
-  </form>
+
+<section class="stats-grid" aria-label="Application summary">
+  <article class="stat"><strong>{{ stats.groups }}</strong><span>Groups</span></article>
+  <article class="stat"><strong>{{ stats.members }}</strong><span>Members</span></article>
+  <article class="stat"><strong>{{ stats.plans }}</strong><span>Plans</span></article>
 </section>
+
+<div class="dashboard-grid">
+  <section class="card">
+    <div class="section-heading"><h2>Recent groups</h2><a href="{{ url_for('groups') }}">View all</a></div>
+    {% if groups %}
+      <div class="item-list">
+        {% for group in groups %}
+          <a class="list-item" href="{{ url_for('group_detail', group_id=group._id) }}">
+            <span><strong>{{ group.name }}</strong><small>{{ group.member_ids|length }} members</small></span><span>→</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}<p class="muted">No groups yet. Create one to begin scheduling.</p>{% endif %}
+  </section>
+  <section class="card">
+    <div class="section-heading"><h2>Recent plans</h2></div>
+    {% if recent_plans %}
+      <div class="item-list">
+        {% for plan in recent_plans %}
+          <a class="list-item" href="{{ url_for('plan_detail', plan_id=plan._id) }}">
+            <span><strong>{{ plan.title }}</strong><small>{{ plan.group_name }} · {{ plan.status|title }}</small></span><span>→</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}<p class="muted">Plans will appear here after you create them inside a group.</p>{% endif %}
+  </section>
+</div>
 {% endblock %}
