@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ plan.title }} | Group Planner{% endblock %}
+{% macro time_picker(name, value, label) -%}
+<label class="unified-time-input"><span>{{ label }}</span><span class="unified-time-control"><input name="{{ name }}" type="text" value="{{ value|time_input if value else '' }}" placeholder="Optional" inputmode="text" autocomplete="off" aria-label="{{ label }}, optional" data-unified-time></span></label>
+{%- endmacro %}
 {% block content %}
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
 
@@ -21,7 +24,7 @@
     <div>
       <strong class="attendance-total">{{ rsvp.counts.overall_attending }}/{{ rsvp.rows|length }} attending</strong>
       <p class="compact-rsvp-summary">
-        {{ rsvp.counts.attending }} Attending · {{ rsvp.counts.arriving_late }} Late · {{ rsvp.counts.leaving_early }} Leaving Early · {{ rsvp.counts.arriving_late_leaving_early }} Late &amp; Leaving Early · {{ rsvp.counts.not_attending }} Not Attending · {{ rsvp.counts.no_response }} Pending
+        {{ rsvp.counts.attending }} Attending · {{ rsvp.counts.not_attending }} Not Attending · {{ rsvp.counts.no_response }} Pending
       </p>
     </div>
     {% if eligible_invitees %}
@@ -54,28 +57,23 @@
           <article class="card rsvp-row">
             <div class="rsvp-member">
               <strong>{{ row.member.display_name }}</strong>
-              <span class="rsvp-status status-{{ row.status }}">
+              <span class="rsvp-status status-{{ row.status }} {% if row.arriving_late or row.leaving_early %}status-partial{% endif %}">
                 <span class="rsvp-status-dot" aria-hidden="true"></span>
                 {% if row.status == 'attending' %}Attending
                 {% elif row.status == 'not_attending' %}Not attending
-                {% elif row.status == 'arriving_late' %}Arriving at {{ row.arrival_time|time12 }}
-                {% elif row.status == 'leaving_early' %}Leaving at {{ row.departure_time|time12 }}
-                {% elif row.status == 'arriving_late_leaving_early' %}{{ row.arrival_time|time12 }} – {{ row.departure_time|time12 }}
                 {% else %}Awaiting response{% endif %}
               </span>
+              {% if row.status == 'attending' and row.arriving_late and row.leaving_early %}<span class="rsvp-detail">{% if row.arrival_time and row.departure_time %}{{ row.arrival_time|time12 }} – {{ row.departure_time|time12 }}{% elif row.arrival_time %}Arriving at {{ row.arrival_time|time12 }} · Leaving early{% elif row.departure_time %}Arriving late · Leaving at {{ row.departure_time|time12 }}{% else %}Arriving late · Leaving early{% endif %}</span>{% elif row.status == 'attending' and row.arriving_late %}<span class="rsvp-detail">{% if row.arrival_time %}Arriving at {{ row.arrival_time|time12 }}{% else %}Arriving late{% endif %}</span>{% elif row.status == 'attending' and row.leaving_early %}<span class="rsvp-detail">{% if row.departure_time %}Leaving at {{ row.departure_time|time12 }}{% else %}Leaving early{% endif %}</span>{% endif %}
             </div>
-            <form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form>
+            <form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form data-arrival-default="{{ rsvp_time_defaults.arrival|time_input if rsvp_time_defaults.arrival else '' }}" data-departure-default="{{ rsvp_time_defaults.departure|time_input if rsvp_time_defaults.departure else '' }}">
               <input type="hidden" name="member_id" value="{{ row.member._id }}">
               <label>Response<select name="status" required data-rsvp-status>
                 <option value="attending" {% if row.status == 'attending' %}selected{% endif %}>Attending</option>
                 <option value="not_attending" {% if row.status == 'not_attending' %}selected{% endif %}>Not Attending</option>
-                <option value="arriving_late" {% if row.status == 'arriving_late' %}selected{% endif %}>Arriving Late</option>
-                <option value="leaving_early" {% if row.status == 'leaving_early' %}selected{% endif %}>Leaving Early</option>
-                <option value="arriving_late_leaving_early" {% if row.status == 'arriving_late_leaving_early' %}selected{% endif %}>Arriving Late &amp; Leaving Early</option>
               </select></label>
-              <label class="rsvp-time-field" data-rsvp-arrival-field>Arrival<select name="arrival_time" data-rsvp-arrival><option value="">Select arrival</option>{% for value in event_time_options %}<option value="{{ value }}" {% if row.arrival_time == value %}selected{% endif %}>{{ value|time12 }}</option>{% endfor %}</select></label>
-              <label class="rsvp-time-field" data-rsvp-departure-field>Leaving<select name="departure_time" data-rsvp-departure><option value="">Select departure</option>{% for value in event_time_options %}<option value="{{ value }}" {% if row.departure_time == value %}selected{% endif %}>{{ value|time12 }}</option>{% endfor %}</select></label>
-              <button class="button secondary" type="submit">Save RSVP</button>
+              <div class="rsvp-modifiers" data-rsvp-modifiers><label><input type="checkbox" name="arriving_late" {% if row.arriving_late %}checked{% endif %} data-rsvp-arriving-late> Arriving late</label><label><input type="checkbox" name="leaving_early" {% if row.leaving_early %}checked{% endif %} data-rsvp-leaving-early> Leaving early</label></div>
+              <div class="rsvp-details" data-rsvp-details><div class="rsvp-time-field" data-rsvp-arrival-field>{{ time_picker('arrival_time', row.arrival_time, 'Arrival time') }}</div><div class="rsvp-time-field" data-rsvp-departure-field>{{ time_picker('departure_time', row.departure_time, 'Leaving time') }}</div></div>
+              <div class="rsvp-action"><button class="button secondary" type="submit">Save RSVP</button></div>
             </form>
           </article>
         {% endfor %}

@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -467,10 +468,10 @@ def test_basic_rsvp_responses_persist(app_and_db, status):
 
 
 @pytest.mark.parametrize(
-    ("status", "response_time"),
-    [("arriving_late", "20:00"), ("leaving_early", "21:30")],
+    ("modifier", "field_name", "response_time"),
+    [("arriving_late", "arrival_time", "20:00"), ("leaving_early", "departure_time", "21:30")],
 )
-def test_timed_rsvp_responses_persist(app_and_db, status, response_time):
+def test_timed_rsvp_responses_persist(app_and_db, modifier, field_name, response_time):
     app, database = app_and_db
     _group_id, plan_id, members = make_scheduled_plan_with_members(database)
 
@@ -478,25 +479,25 @@ def test_timed_rsvp_responses_persist(app_and_db, status, response_time):
         f"/plans/{plan_id}/rsvp",
         data={
             "member_id": str(members["Jamie"]),
-            "status": status,
-            "response_time": response_time,
+            "status": "attending", modifier: "on", field_name: response_time,
         },
     )
 
     saved = database.plans.find_one({"_id": plan_id})["rsvps"][str(members["Jamie"])]
     assert response.status_code == 302
-    assert saved["status"] == status
-    assert saved["time"] == response_time
+    assert saved["status"] == "attending"
+    assert saved[modifier] is True
+    assert saved[field_name] == response_time
 
 
 @pytest.mark.parametrize(
-    ("status", "response_time", "message"),
+    ("modifier", "field_name", "response_time", "message"),
     [
-        ("arriving_late", "18:30", b"Arrival time must be after the start"),
-        ("leaving_early", "22:30", b"Departure time must be no earlier"),
+        ("arriving_late", "arrival_time", "18:30", b"Arrival time must be after the start"),
+        ("leaving_early", "departure_time", "22:30", b"Leaving time must be after the start"),
     ],
 )
-def test_invalid_timed_rsvp_is_rejected(app_and_db, status, response_time, message):
+def test_invalid_timed_rsvp_is_rejected(app_and_db, modifier, field_name, response_time, message):
     app, database = app_and_db
     _group_id, plan_id, members = make_scheduled_plan_with_members(database)
 
@@ -504,8 +505,7 @@ def test_invalid_timed_rsvp_is_rejected(app_and_db, status, response_time, messa
         f"/plans/{plan_id}/rsvp",
         data={
             "member_id": str(members["Chris"]),
-            "status": status,
-            "response_time": response_time,
+                "status": "attending", modifier: "on", field_name: response_time,
         },
         follow_redirects=True,
     )
@@ -523,13 +523,14 @@ def test_rsvp_update_replaces_member_response_without_duplicate(app_and_db):
     client.post(f"/plans/{plan_id}/rsvp", data={"member_id": member_id, "status": "attending"})
     client.post(
         f"/plans/{plan_id}/rsvp",
-        data={"member_id": member_id, "status": "arriving_late", "response_time": "20:30"},
+        data={"member_id": member_id, "status": "attending", "arriving_late": "on", "arrival_time": "20:30"},
     )
     plan = database.plans.find_one({"_id": plan_id})
 
     assert len(plan["rsvps"]) == 1
-    assert plan["rsvps"][member_id]["status"] == "arriving_late"
-    assert plan["rsvps"][member_id]["time"] == "20:30"
+    assert plan["rsvps"][member_id]["status"] == "attending"
+    assert plan["rsvps"][member_id]["arriving_late"] is True
+    assert plan["rsvps"][member_id]["arrival_time"] == "20:30"
 
 
 def test_rsvp_attendance_display_and_counts(app_and_db):
@@ -686,7 +687,7 @@ def test_arrival_time_must_be_strictly_inside_event(app_and_db, response_time, a
 
     app.test_client().post(f"/plans/{plan_id}/rsvp", data={
         "member_id": str(member_id),
-        "status": "arriving_late",
+        "status": "attending", "arriving_late": "on",
         "arrival_time": response_time,
     })
     response = database.plans.find_one({"_id": plan_id})["rsvps"].get(str(member_id))
@@ -706,7 +707,7 @@ def test_departure_time_must_be_strictly_inside_event(app_and_db, response_time,
 
     app.test_client().post(f"/plans/{plan_id}/rsvp", data={
         "member_id": str(member_id),
-        "status": "leaving_early",
+        "status": "attending", "leaving_early": "on",
         "departure_time": response_time,
     })
     response = database.plans.find_one({"_id": plan_id})["rsvps"].get(str(member_id))
@@ -723,7 +724,7 @@ def test_combined_late_and_early_rsvp_validates_order_and_counts_as_attending(ap
 
     response = client.post(f"/plans/{plan_id}/rsvp", data={
         "member_id": str(member_id),
-        "status": "arriving_late_leaving_early",
+        "status": "attending", "arriving_late": "on", "leaving_early": "on",
         "arrival_time": "19:00",
         "departure_time": "21:00",
     })
@@ -735,7 +736,7 @@ def test_combined_late_and_early_rsvp_validates_order_and_counts_as_attending(ap
     page = client.get(f"/plans/{plan_id}").get_data(as_text=True)
     assert "1/1 attending" in page
     assert "7:00 PM – 9:00 PM" in page
-    assert "1 Late &amp; Leaving Early" in page
+    assert "Attending" in page
 
     invalid_plan_id = make_plan(
         database,
@@ -750,7 +751,7 @@ def test_combined_late_and_early_rsvp_validates_order_and_counts_as_attending(ap
         f"/plans/{invalid_plan_id}/rsvp",
         data={
             "member_id": str(member_id),
-            "status": "arriving_late_leaving_early",
+            "status": "attending", "arriving_late": "on", "leaving_early": "on",
             "arrival_time": "21:00",
             "departure_time": "20:00",
         },
@@ -760,16 +761,17 @@ def test_combined_late_and_early_rsvp_validates_order_and_counts_as_attending(ap
     assert database.plans.find_one({"_id": invalid_plan_id})["rsvps"] == {}
 
 
-def test_rsvp_page_offers_only_dynamic_fifteen_minute_event_times(app_and_db):
+def test_rsvp_page_uses_unified_optional_five_minute_time_inputs(app_and_db):
     app, database = app_and_db
     _group_id, plan_id, _member_id = make_six_to_ten_plan(database)
 
     page = app.test_client().get(f"/plans/{plan_id}").get_data(as_text=True)
 
-    assert 'value="18:15"' in page and "6:15 PM</option>" in page
-    assert 'value="21:45"' in page and "9:45 PM</option>" in page
-    assert '<option value="18:00">' not in page
-    assert '<option value="22:00">' not in page
+    assert 'name="arrival_time"' in page
+    assert 'name="departure_time"' in page
+    assert 'data-unified-time' in page
+    assert 'data-picker-minute' in page
+    assert '<option value="05">05</option>' in page
     assert 'type="time"' not in page
 
 
@@ -844,10 +846,12 @@ def test_group_hierarchy_and_upcoming_count_exclude_past_and_planning(app_and_db
 
     page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
 
-    assert page.index("<h2>Upcoming Plans</h2>") < page.index("<h2>Members")
+    assert page.index("<h2>Upcoming Plans") < page.index("<h2>Planning")
+    assert page.index("<h2>Planning") < page.index("<h2>Weekly Availability")
+    assert page.index("<h2>Weekly Availability") < page.index("<h2>Members")
     assert "Future Event" in page
     assert "Past Event" not in page
-    assert "1 Upcoming Plan" in page
+    assert "1 upcoming plan" in page
     assert "Still Planning" in page
     assert f'href="/plans/' in page
 
@@ -943,11 +947,8 @@ def test_availability_editor_has_weekdays_and_populates_edit_picker(app_and_db):
     assert all(f'data-availability-day="{day}"' in page for day in (
         "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
     ))
-    assert 'value="6" selected' in page
-    assert 'value="35" selected' in page
-    assert 'value="PM" selected' in page
-    assert 'value="8" selected' in page
-    assert 'value="05" selected' in page
+    assert 'value="06:35 PM"' in page
+    assert 'value="08:05 PM"' in page
 
 
 def test_availability_back_link_preserves_group_or_member_parent(app_and_db):
@@ -977,6 +978,159 @@ def test_group_planning_contains_create_plan_and_branding_is_updated(app_and_db)
     page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
     dashboard = app.test_client().get("/").get_data(as_text=True)
 
-    assert page.index("<h2>Planning</h2>") < page.index("+ Create Plan")
-    assert page.index("Edit Group") < page.index("<h2>Planning</h2>")
+    assert page.index("<h2>Planning") < page.index("+ Create Plan")
+    assert page.index("Edit Group") < page.index("<h2>Planning")
     assert "Group Planner" in dashboard
+
+
+def test_current_availability_shows_every_day_and_weekly_overview(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    database.availability.insert_many([
+        {"user_id": member_id, "day": "Monday", "day_order": 0, "start_time": "09:05", "end_time": "10:50"},
+        {"user_id": member_id, "day": "Thursday", "day_order": 3, "start_time": "14:30", "end_time": "17:45"},
+    ])
+
+    page = app.test_client().get(
+        f"/users/{member_id}/availability?selected_day=Thursday"
+    ).get_data(as_text=True)
+
+    assert "Weekly Overview" in page
+    assert "Current Availability" in page
+    assert all(f"<h3>{day}</h3>" in page for day in (
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
+    ))
+    assert "9:05 AM – 10:50 AM" in page
+    assert "2:30 PM – 5:45 PM" in page
+    assert 'data-availability-bulk hidden' in page
+    assert 'data-availability-edit>Edit<' in page
+
+
+def test_add_availability_preserves_selected_day_and_time_values(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    response = app.test_client().post(f"/users/{member_id}/availability", data={
+        "day": "Thursday", "selected_day": "Thursday",
+        "start_hour": "2", "start_minute": "30", "start_period": "PM",
+        "end_hour": "5", "end_minute": "45", "end_period": "PM",
+    })
+
+    assert "selected_day=Thursday" in response.headers["Location"]
+    assert "start_time=14:30" in response.headers["Location"]
+    assert "end_time=17:45" in response.headers["Location"]
+
+
+def test_bulk_availability_edit_updates_and_removes_only_when_saved(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    first_id, second_id = [database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": start, "end_time": end,
+    }).inserted_id for start, end in (("09:00", "10:00"), ("14:00", "15:00"))]
+    payload = [
+        {"id": str(first_id), "start_time": "09:05", "end_time": "10:50", "deleted": False},
+        {"id": str(second_id), "start_time": "14:00", "end_time": "15:00", "deleted": True},
+    ]
+
+    response = app.test_client().post(
+        f"/users/{member_id}/availability/bulk-edit",
+        data={"availability_payload": json.dumps(payload)},
+    )
+
+    assert response.status_code == 302
+    assert database.availability.find_one({"_id": first_id})["start_time"] == "09:05"
+    assert database.availability.find_one({"_id": first_id})["end_time"] == "10:50"
+    assert database.availability.find_one({"_id": second_id}) is None
+
+
+@pytest.mark.parametrize(
+    ("start_time", "end_time", "stored_start", "stored_end"),
+    [
+        ("10:00 AM", "04:00 PM", "10:00", "16:00"),
+        ("9:05 am", "10:50AM", "09:05", "10:50"),
+        ("235pm", "11:55 PM", "14:35", "23:55"),
+    ],
+)
+def test_unified_availability_time_input_accepts_valid_five_minute_times(
+    app_and_db, start_time, end_time, stored_start, stored_end
+):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    response = app.test_client().post(f"/users/{member_id}/availability", data={
+        "day": "Monday", "start_time": start_time, "end_time": end_time,
+    })
+    saved = database.availability.find_one({"user_id": member_id})
+
+    assert response.status_code == 302
+    assert (saved["start_time"], saved["end_time"]) == (stored_start, stored_end)
+
+
+def test_unified_availability_time_input_rejects_non_five_minute_times(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    response = app.test_client().post(f"/users/{member_id}/availability", data={
+        "day": "Monday", "start_time": "10:03 AM", "end_time": "04:00 PM",
+    }, follow_redirects=True)
+
+    assert b"Please enter a time in 5-minute increments." in response.data
+    assert database.availability.count_documents({"user_id": member_id}) == 0
+
+
+def test_attendance_modifiers_are_optional_and_cleared_for_not_attending(app_and_db):
+    app, database = app_and_db
+    _group_id, plan_id, member_id = make_six_to_ten_plan(database)
+    client = app.test_client()
+
+    client.post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id), "status": "attending",
+        "arriving_late": "on", "leaving_early": "on",
+    })
+    partial = database.plans.find_one({"_id": plan_id})["rsvps"][str(member_id)]
+    assert partial["arriving_late"] is True and partial["leaving_early"] is True
+    assert "arrival_time" not in partial and "departure_time" not in partial
+
+    client.post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id), "status": "not_attending",
+    })
+    saved = database.plans.find_one({"_id": plan_id})["rsvps"][str(member_id)]
+    assert saved["status"] == "not_attending"
+    assert "arriving_late" not in saved and "arrival_time" not in saved
+
+
+def test_availability_page_emphasizes_member_and_uses_input_triggered_picker(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+
+    assert "<h1>Availability for Alex</h1>" in page
+    assert "<h2>Recurring Weekly Availability</h2>" in page
+    assert page.count("data-unified-time") >= 2
+    assert "data-time-picker-trigger" not in page
+
+
+def test_rsvp_page_uses_stable_details_and_action_regions(app_and_db):
+    app, database = app_and_db
+    _group_id, plan_id, _member_id = make_six_to_ten_plan(database)
+
+    page = app.test_client().get(f"/plans/{plan_id}").get_data(as_text=True)
+
+    assert "data-rsvp-modifiers" in page
+    assert "data-rsvp-details" in page
+    assert "rsvp-action" in page
+    assert "data-time-picker-trigger" not in page

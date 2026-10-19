@@ -1,6 +1,8 @@
 """CS4800 recurring group scheduling MVP."""
 
+import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -90,9 +92,12 @@ def create_app(database_override=None):
         hour = form.get(f"{prefix}_hour", "").strip()
         minute = form.get(f"{prefix}_minute", "").strip()
         period = form.get(f"{prefix}_period", "").strip().upper()
+        typed_time = form.get(f"{prefix}_time", "").strip()
 
+        if typed_time:
+            return normalize_time_text(typed_time)
         if not any((hour, minute, period)):
-            return form.get(f"{prefix}_time", "").strip()
+            return ""
         if not all((hour, minute, period)):
             raise ValueError("Choose an hour, minute, and AM or PM.")
         if hour not in {str(value) for value in range(1, 13)}:
@@ -107,14 +112,31 @@ def create_app(database_override=None):
             hour_value += 12
         return f"{hour_value:02d}:{int(minute):02d}"
 
-    def validate_availability(form):
-        day = form.get("day", "").strip()
+    def normalize_time_text(value):
+        """Accept common 12-hour text forms while storing a normalized HH:MM."""
+        value = (value or "").strip().upper().replace(" ", "")
+        if not value:
+            return ""
+        match = re.fullmatch(r"(\d{1,2})(?::?(\d{2}))?(AM|PM)", value)
+        if match:
+            hour, minute, period = int(match.group(1)), int(match.group(2) or 0), match.group(3)
+            if not 1 <= hour <= 12 or minute > 59:
+                raise ValueError("Please enter a valid time.")
+            if minute % 5:
+                raise ValueError("Please enter a time in 5-minute increments.")
+            hour = hour % 12 + (12 if period == "PM" else 0)
+            return f"{hour:02d}:{minute:02d}"
         try:
-            start_time = normalize_selector_time(form, "start")
-            end_time = normalize_selector_time(form, "end")
-        except ValueError as exc:
-            return None, str(exc)
+            hour, minute = map(int, value.split(":"))
+        except ValueError:
+            raise ValueError("Please enter a valid time.") from None
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError("Please enter a valid time.")
+        if minute % 5:
+            raise ValueError("Please enter a time in 5-minute increments.")
+        return f"{hour:02d}:{minute:02d}"
 
+    def validate_availability_values(day, start_time, end_time):
         if not all([day, start_time, end_time]):
             return None, "Day, start time, and end time are required."
         if day not in DAY_ORDER:
@@ -126,7 +148,6 @@ def create_app(database_override=None):
             return None, "Please enter valid start and end times."
         if end_minutes <= start_minutes:
             return None, "End time must be later than start time."
-
         return {
             "day": day,
             "day_order": DAY_ORDER[day],
@@ -134,6 +155,16 @@ def create_app(database_override=None):
             "end_time": end_time,
             "status": "available",
         }, None
+
+    def validate_availability(form):
+        day = form.get("day", "").strip()
+        try:
+            start_time = normalize_selector_time(form, "start")
+            end_time = normalize_selector_time(form, "end")
+        except ValueError as exc:
+            return None, str(exc)
+
+        return validate_availability_values(day, start_time, end_time)
 
     def availability_return_context():
         """Return only to known in-app parents, never to an external URL."""
@@ -154,6 +185,20 @@ def create_app(database_override=None):
             if group and parsed.path == url_for("group_detail", group_id=group["_id"]):
                 return url_for("group_detail", group_id=group["_id"]), group["name"]
         return url_for("users"), "Members"
+
+    def availability_editor_state():
+        selected_day = request.values.get("selected_day", DAYS[0]).strip()
+        if selected_day not in DAY_ORDER:
+            selected_day = DAYS[0]
+        values = {"selected_day": selected_day, "start_time": "09:00", "end_time": "10:00"}
+        for field in ("start_time", "end_time"):
+            try:
+                candidate = normalize_time_text(request.values.get(field, ""))
+                if candidate:
+                    values[field] = candidate
+            except ValueError:
+                pass
+        return values
 
     def validate_plan_form(form, group_size, require_title=True):
         values = {
@@ -281,7 +326,7 @@ def create_app(database_override=None):
             if member_id in members_by_id
         ]
 
-    def event_time_options(plan, increment_minutes=15):
+    def event_time_options(plan, increment_minutes=5):
         start = as_datetime(plan.get("scheduled_start"))
         end = as_datetime(plan.get("scheduled_end"))
         if not start or not end or end <= start:
@@ -292,6 +337,16 @@ def create_app(database_override=None):
             options.append(current.strftime("%H:%M"))
             current += timedelta(minutes=increment_minutes)
         return options
+
+    def rsvp_time_defaults(plan):
+        start = as_datetime(plan.get("scheduled_start"))
+        end = as_datetime(plan.get("scheduled_end"))
+        if not start or not end or end - start <= timedelta(minutes=10):
+            return {"arrival": "", "departure": ""}
+        return {
+            "arrival": (start + timedelta(minutes=5)).strftime("%H:%M"),
+            "departure": (end - timedelta(minutes=5)).strftime("%H:%M"),
+        }
 
     def datetime_sort_value(value):
         if isinstance(value, str):
@@ -319,26 +374,38 @@ def create_app(database_override=None):
         for member in members:
             response = responses.get(str(member["_id"]), {})
             status = response.get("status", "no_response")
-            if status not in counts:
+            # Read legacy top-level partial statuses as the new Attending +
+            # modifier shape so existing saved RSVP documents stay usable.
+            arriving_late = response.get("arriving_late", False) or status in {
+                "arriving_late", "arriving_late_leaving_early"
+            }
+            leaving_early = response.get("leaving_early", False) or status in {
+                "leaving_early", "arriving_late_leaving_early"
+            }
+            if status in {"arriving_late", "leaving_early", "arriving_late_leaving_early"}:
+                status = "attending"
+            if status not in {"attending", "not_attending", "no_response"}:
                 status = "no_response"
             counts[status] += 1
+            if status == "attending" and arriving_late and leaving_early:
+                counts["arriving_late_leaving_early"] += 1
+            elif status == "attending" and arriving_late:
+                counts["arriving_late"] += 1
+            elif status == "attending" and leaving_early:
+                counts["leaving_early"] += 1
             rows.append({
                 "member": member,
                 "status": status,
-                "time": response.get("time"),
+                "arriving_late": bool(arriving_late and status == "attending"),
+                "leaving_early": bool(leaving_early and status == "attending"),
                 "arrival_time": response.get("arrival_time") or (
-                    response.get("time") if status == "arriving_late" else None
+                    response.get("time") if arriving_late else None
                 ),
                 "departure_time": response.get("departure_time") or (
-                    response.get("time") if status == "leaving_early" else None
+                    response.get("time") if leaving_early else None
                 ),
             })
-        counts["overall_attending"] = (
-            counts["attending"]
-            + counts["arriving_late"]
-            + counts["leaving_early"]
-            + counts["arriving_late_leaving_early"]
-        )
+        counts["overall_attending"] = counts["attending"]
         counts["pending"] = counts["no_response"]
         return {"counts": counts, "rows": rows}
 
@@ -363,6 +430,13 @@ def create_app(database_override=None):
         except ValueError:
             return value
 
+    @app.template_filter("time_input")
+    def time_input(value):
+        try:
+            return datetime.strptime(value, "%H:%M").strftime("%I:%M %p")
+        except (TypeError, ValueError):
+            return "09:00 AM"
+
     @app.template_filter("time_parts")
     def time_parts(value):
         """Convert a normalized time into values for the 12-hour editor."""
@@ -377,6 +451,13 @@ def create_app(database_override=None):
             "minute": f"{minute:02d}",
             "period": "PM" if hour_24 >= 12 else "AM",
         }
+
+    @app.template_filter("time_minutes")
+    def time_minutes(value):
+        try:
+            return parse_time(value)
+        except ValueError:
+            return 0
 
     @app.template_filter("duration_label")
     def duration_label(minutes):
@@ -669,6 +750,7 @@ def create_app(database_override=None):
         db = require_database()
         user = get_user(user_id)
         return_to, return_label = availability_return_context()
+        editor_state = availability_editor_state()
         if request.method == "POST":
             values, error = validate_availability(request.form)
             if error:
@@ -677,7 +759,14 @@ def create_app(database_override=None):
                 values.update({"user_id": user["_id"], "created_at": utc_now(), "updated_at": utc_now()})
                 db.availability.insert_one(values)
                 flash("Availability window added.", "success")
-            return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
+            return redirect(url_for(
+                "member_availability",
+                user_id=user_id,
+                return_to=return_to,
+                selected_day=editor_state["selected_day"],
+                start_time=values["start_time"] if not error else editor_state["start_time"],
+                end_time=values["end_time"] if not error else editor_state["end_time"],
+            ))
 
         entries = list(
             db.availability.find({"user_id": user["_id"]}).sort(
@@ -691,7 +780,55 @@ def create_app(database_override=None):
             days=DAYS,
             return_to=return_to,
             return_label=return_label,
+            editor_state=editor_state,
         )
+
+    @app.post("/users/<user_id>/availability/bulk-edit")
+    def bulk_edit_availability(user_id):
+        db = require_database()
+        user = get_user(user_id)
+        return_to, _return_label = availability_return_context()
+        try:
+            changes = json.loads(request.form.get("availability_payload", "[]"))
+        except json.JSONDecodeError:
+            changes = None
+        if not isinstance(changes, list):
+            flash("Availability changes could not be read.", "error")
+            return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
+
+        existing = {
+            str(entry["_id"]): entry
+            for entry in db.availability.find({"user_id": user["_id"]})
+        }
+        changes_to_apply = []
+        for change in changes:
+            if not isinstance(change, dict) or change.get("id") not in existing:
+                flash("One of the availability windows could not be found.", "error")
+                return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
+            entry = existing[change["id"]]
+            if change.get("deleted"):
+                changes_to_apply.append(("delete", entry["_id"], None))
+                continue
+            values, error = validate_availability_values(
+                entry["day"],
+                change.get("start_time", ""),
+                change.get("end_time", ""),
+            )
+            if error:
+                flash(error, "error")
+                return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
+            values["updated_at"] = utc_now()
+            changes_to_apply.append(("update", entry["_id"], values))
+        # Validate the entire session before changing any document so invalid
+        # input never leaves a partially edited weekly schedule.
+        for operation, entry_id, values in changes_to_apply:
+            if operation == "delete":
+                db.availability.delete_one({"_id": entry_id})
+            else:
+                db.availability.update_one({"_id": entry_id}, {"$set": values})
+        if changes_to_apply:
+            flash("Availability changes saved.", "success")
+        return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
 
     @app.post("/availability/<availability_id>/edit")
     def edit_availability(availability_id):
@@ -809,6 +946,7 @@ def create_app(database_override=None):
             rsvp=rsvp_summary(plan, members),
             eligible_invitees=eligible_invitees,
             event_time_options=event_time_options(plan),
+            rsvp_time_defaults=rsvp_time_defaults(plan),
         )
 
     @app.route("/plans/<plan_id>/edit", methods=["GET", "POST"])
@@ -935,10 +1073,7 @@ def create_app(database_override=None):
             abort(404)
 
         status = request.form.get("status", "").strip()
-        allowed_statuses = {
-            "attending", "not_attending", "arriving_late", "leaving_early",
-            "arriving_late_leaving_early",
-        }
+        allowed_statuses = {"attending", "not_attending"}
         if status not in allowed_statuses:
             flash("Please choose a valid RSVP response.", "error")
             return redirect(url_for("plan_detail", plan_id=plan["_id"]))
@@ -946,54 +1081,52 @@ def create_app(database_override=None):
         scheduled_start = as_datetime(plan["scheduled_start"])
         scheduled_end = as_datetime(plan["scheduled_end"])
 
-        def response_datetime(field_name, legacy=False):
+        def response_datetime(field_name):
             value = request.form.get(field_name, "").strip()
-            if not value and legacy:
-                value = request.form.get("response_time", "").strip()
+            if not value:
+                return "", None
             try:
-                time_minutes = parse_time(value)
+                normalized = normalize_time_text(value)
+                time_minutes = parse_time(normalized)
             except ValueError:
                 return value, None
             value_datetime = datetime.combine(
                 scheduled_start.date(), datetime.min.time()
             ).replace(hour=time_minutes // 60, minute=time_minutes % 60)
-            return value, value_datetime
+            return normalized, value_datetime
 
         response = {"status": status, "updated_at": utc_now()}
-        if status == "arriving_late":
-            arrival_time, arrival = response_datetime("arrival_time", legacy=True)
-            if not arrival:
-                flash("A valid arrival time is required.", "error")
-                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            if not scheduled_start < arrival < scheduled_end:
-                flash("Arrival time must be after the start and before the event end.", "error")
-                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            response.update({"arrival_time": arrival_time, "time": arrival_time})
-        elif status == "leaving_early":
-            departure_time, departure = response_datetime("departure_time", legacy=True)
-            if not departure:
-                flash("A valid departure time is required.", "error")
-                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            if not scheduled_start < departure < scheduled_end:
-                flash(
-                    "Departure time must be no earlier than the first valid option and before the event end.",
-                    "error",
-                )
-                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            response.update({"departure_time": departure_time, "time": departure_time})
-        elif status == "arriving_late_leaving_early":
+        if status == "attending":
+            arriving_late = request.form.get("arriving_late") == "on"
+            leaving_early = request.form.get("leaving_early") == "on"
             arrival_time, arrival = response_datetime("arrival_time")
             departure_time, departure = response_datetime("departure_time")
-            if not arrival or not departure:
-                flash("Valid arrival and departure times are required.", "error")
+            if arrival_time and not arrival:
+                flash("Please enter a valid arrival time.", "error")
                 return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            if not scheduled_start < arrival < departure < scheduled_end:
+            if departure_time and not departure:
+                flash("Please enter a valid leaving time.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            if arrival and not scheduled_start < arrival < scheduled_end:
+                flash("Arrival time must be after the start and before the event end.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            if departure and not scheduled_start < departure < scheduled_end:
+                flash("Leaving time must be after the start and before the event end.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            if arrival and departure and not arrival < departure:
                 flash(
                     "Arrival and departure must be inside the event, with arrival before departure.",
                     "error",
                 )
                 return redirect(url_for("plan_detail", plan_id=plan["_id"]))
-            response.update({"arrival_time": arrival_time, "departure_time": departure_time})
+            response.update({
+                "arriving_late": arriving_late,
+                "leaving_early": leaving_early,
+            })
+            if arriving_late and arrival:
+                response["arrival_time"] = arrival_time
+            if leaving_early and departure:
+                response["departure_time"] = departure_time
 
         db.plans.update_one(
             {"_id": plan["_id"]},

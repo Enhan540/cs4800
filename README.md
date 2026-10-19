@@ -7,7 +7,7 @@ Group Planner is a web application for recurring groups to save member availabil
 - Persistent `users`, `groups`, `availability`, and `plans` MongoDB collections
 - Reusable members with optional email addresses
 - Groups with compact member management and a responsive weekly availability matrix
-- Multiple recurring availability windows per member and day, using a weekday editor with 5-minute time precision
+- Multiple recurring availability windows per member and day, using a weekday editor with unified typed/picker time fields and 5-minute precision
 - Add, edit, and delete availability
 - Plans with any positive whole-minute duration, date range, allowed time range, and minimum attendance
 - A separate scheduling service that searches start times in 30-minute increments while preserving arbitrary durations
@@ -20,7 +20,7 @@ Group Planner is a web application for recurring groups to save member availabil
 - A focused dashboard containing upcoming scheduled plans and clickable group cards
 - Automatic best-time generation when a plan is created or opened
 - Debounced scheduling previews while plan fields are changed, without creating temporary plan records
-- Persistent per-member RSVP responses: attending, not attending, arriving late, leaving early, or both arriving late and leaving early
+- Persistent per-member RSVP responses: attending or not attending, with optional arriving-late and leaving-early modifiers
 - Dynamically generated 15-minute RSVP time choices constrained to the confirmed event
 - Plan participant invitations that reuse existing group members without duplicate records
 - RSVP attendance summaries and partial-attendance details on scheduled plans and plan cards
