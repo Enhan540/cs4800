@@ -3,21 +3,46 @@
 import json
 import os
 import re
+import secrets
+import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
+from authlib.integrations.flask_client import OAuth
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask_login import LoginManager, UserMixin, current_user, login_required, login_user, logout_user
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
+from werkzeug.security import check_password_hash, generate_password_hash
+from cryptography.fernet import Fernet, InvalidToken
+import requests
 
+from services.calendar_service import fetch_calendar_url, normalized_interval, parse_ical_busy_intervals
 from services.scheduling_service import DAYS, find_matching_times, parse_date, parse_time
 
 load_dotenv()
 
 DAY_ORDER = {day: index for index, day in enumerate(DAYS)}
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$")
+ADMIN_PERMISSIONS = {
+    "manage_members",
+    "edit_group",
+    "edit_member_availability",
+    "edit_member_rsvp",
+    "manage_plans",
+}
+
+
+class Account(UserMixin):
+    def __init__(self, document):
+        self.document = document
+        self.id = str(document["_id"])
+        self.username = document["username"]
+        self.auth_methods = document.get("auth_methods", [])
 
 
 def utc_now():
@@ -33,10 +58,19 @@ def object_id(value):
 
 def create_app(database_override=None):
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = (
-        os.getenv("SECRET_KEY")
-        or os.getenv("FLASK_SECRET_KEY")
-        or "dev-only-change-me"
+    configured_secret = os.getenv("SECRET_KEY") or os.getenv("FLASK_SECRET_KEY")
+    if os.getenv("VERCEL") and not configured_secret:
+        raise RuntimeError("SECRET_KEY must be configured in Vercel")
+    app.config["SECRET_KEY"] = configured_secret or "dev-only-change-me"
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "").casefold()
+        in {"1", "true", "yes"},
+        GOOGLE_CLIENT_ID=os.getenv("GOOGLE_CLIENT_ID", ""),
+        GOOGLE_CLIENT_SECRET=os.getenv("GOOGLE_CLIENT_SECRET", ""),
+        GOOGLE_REDIRECT_URI=os.getenv("GOOGLE_REDIRECT_URI", ""),
+        GOOGLE_CALENDAR_REDIRECT_URI=os.getenv("GOOGLE_CALENDAR_REDIRECT_URI", ""),
     )
 
     mongo_uri = os.getenv("MONGO_URI")
@@ -53,8 +87,25 @@ def create_app(database_override=None):
 
     if database is not None:
         try:
-            database.users.create_index("normalized_name", unique=True)
-            database.users.create_index("email", unique=True, sparse=True)
+            user_indexes = database.users.index_information()
+            if "normalized_name_1" in user_indexes:
+                database.users.drop_index("normalized_name_1")
+            if "email_1" in user_indexes:
+                database.users.drop_index("email_1")
+            scoped_email_index = user_indexes.get("account_id_1_email_1")
+            if scoped_email_index and not scoped_email_index.get("partialFilterExpression"):
+                database.users.drop_index("account_id_1_email_1")
+            database.users.create_index(
+                [("account_id", ASCENDING), ("normalized_name", ASCENDING)], unique=True
+            )
+            database.users.create_index(
+                [("account_id", ASCENDING), ("email", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"email": {"$type": "string"}},
+            )
+            database.accounts.create_index("normalized_username", unique=True)
+            database.accounts.create_index("google_sub", unique=True, sparse=True)
+            database.accounts.create_index("google_email", unique=True, sparse=True)
             database.availability.create_index(
                 [("user_id", ASCENDING), ("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
@@ -63,27 +114,181 @@ def create_app(database_override=None):
         except PyMongoError:
             app.logger.exception("Unable to create MongoDB indexes during startup")
 
+    login_manager = LoginManager()
+    login_manager.login_view = "login"
+    login_manager.login_message = "Please log in to continue."
+    login_manager.login_message_category = "error"
+    login_manager.init_app(app)
+
+    oauth = OAuth(app)
+    google = oauth.register(
+        name="google",
+        client_id=app.config["GOOGLE_CLIENT_ID"],
+        client_secret=app.config["GOOGLE_CLIENT_SECRET"],
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
+    app.extensions["google_oauth_client"] = google
+    google_calendar = oauth.register(
+        name="google_calendar",
+        client_id=app.config["GOOGLE_CLIENT_ID"],
+        client_secret=app.config["GOOGLE_CLIENT_SECRET"],
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "https://www.googleapis.com/auth/calendar.events.freebusy"},
+    )
+    app.extensions["google_calendar_oauth_client"] = google_calendar
+
+    @login_manager.user_loader
+    def load_account(account_id):
+        if database is None:
+            return None
+        try:
+            document = database.accounts.find_one({"_id": ObjectId(account_id)})
+        except (InvalidId, TypeError):
+            return None
+        return Account(document) if document else None
+
     def require_database():
         if database is None:
             flash("The database is not configured or is currently unavailable.", "error")
             abort(503)
         return database
 
+    def auth_bypass():
+        return bool(app.config.get("LOGIN_DISABLED"))
+
+    def current_account_id():
+        if not current_user.is_authenticated:
+            return None
+        try:
+            return ObjectId(current_user.id)
+        except (InvalidId, TypeError):
+            return None
+
+    def account_filter(field="account_id"):
+        return {} if auth_bypass() else {field: current_account_id()}
+
+    def group_is_accessible(group):
+        if auth_bypass():
+            return True
+        account_id = current_account_id()
+        return bool(
+            account_id
+            and (
+                group.get("owner_account_id") == account_id
+                or account_id in group.get("account_ids", [])
+            )
+        )
+
+    def group_is_owner(group):
+        return auth_bypass() or group.get("owner_account_id") == current_account_id()
+
+    def group_role(group, account_id=None):
+        if auth_bypass():
+            return "owner"
+        account_id = account_id or current_account_id()
+        if not account_id:
+            return None
+        if group.get("owner_account_id") == account_id:
+            return "owner"
+        return group.get("account_roles", {}).get(str(account_id), "member")
+
+    def has_group_permission(group, permission, account_id=None):
+        account_id = account_id or current_account_id()
+        if auth_bypass() or group.get("owner_account_id") == account_id:
+            return True
+        if permission not in ADMIN_PERMISSIONS:
+            return False
+        return (
+            group_role(group, account_id) == "admin"
+            and permission
+            in group.get("admin_permissions", {}).get(str(account_id), [])
+        )
+
+    def require_group_permission(group, permission):
+        if not has_group_permission(group, permission):
+            abort(403)
+
+    def require_group_owner(group):
+        if not group_is_owner(group):
+            abort(403)
+
+    def member_is_accessible(member):
+        if auth_bypass() or member.get("account_id") == current_account_id():
+            return True
+        return bool(
+            require_database().groups.find_one(
+                {
+                    "account_ids": current_account_id(),
+                    "member_ids": member["_id"],
+                },
+                {"_id": 1},
+            )
+        )
+
+    def member_can_manage(member):
+        if auth_bypass() or member.get("account_id") == current_account_id():
+            return True
+        return any(
+            has_group_permission(group, "edit_member_availability")
+            for group in require_database().groups.find(
+                {"account_ids": current_account_id(), "member_ids": member["_id"]}
+            )
+        )
+
     def get_user(user_id):
         user = require_database().users.find_one({"_id": object_id(user_id)})
-        if not user:
+        if not user or not member_is_accessible(user):
             abort(404)
         return user
 
+    def ensure_account_member():
+        db = require_database()
+        account_id = current_account_id()
+        member = db.users.find_one({"linked_account_id": account_id})
+        if member:
+            return member
+        account = db.accounts.find_one({"_id": account_id})
+        if not account:
+            abort(404)
+        now = utc_now()
+        document = {
+            "display_name": account["username"],
+            "normalized_name": account["username"].casefold(),
+            "account_id": account_id,
+            "linked_account_id": account_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            result = db.users.insert_one(document)
+        except DuplicateKeyError:
+            member = db.users.find_one(
+                {"account_id": account_id, "normalized_name": document["normalized_name"]}
+            )
+            if not member:
+                raise
+            db.users.update_one(
+                {"_id": member["_id"]},
+                {"$set": {"linked_account_id": account_id, "updated_at": now}},
+            )
+            member["linked_account_id"] = account_id
+            return member
+        document["_id"] = result.inserted_id
+        return document
+
     def get_group(group_id):
         group = require_database().groups.find_one({"_id": object_id(group_id)})
-        if not group:
+        if not group or not group_is_accessible(group):
             abort(404)
         return group
 
     def get_plan(plan_id):
         plan = require_database().plans.find_one({"_id": object_id(plan_id)})
         if not plan:
+            abort(404)
+        group = require_database().groups.find_one({"_id": plan.get("group_id")})
+        if not group or not group_is_accessible(group):
             abort(404)
         return plan
 
@@ -182,7 +387,11 @@ def create_app(database_override=None):
                 group = require_database().groups.find_one({"_id": ObjectId(group_value)})
             except InvalidId:
                 group = None
-            if group and parsed.path == url_for("group_detail", group_id=group["_id"]):
+            if (
+                group
+                and group_is_accessible(group)
+                and parsed.path == url_for("group_detail", group_id=group["_id"])
+            ):
                 return url_for("group_detail", group_id=group["_id"]), group["name"]
         return url_for("users"), "Members"
 
@@ -253,6 +462,25 @@ def create_app(database_override=None):
         availability_records = list(
             require_database().availability.find({"user_id": {"$in": member_ids}})
         )
+        member_documents = list(
+            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1})
+        )
+        account_by_member = {
+            str(member["_id"]): member.get("linked_account_id") for member in member_documents
+        }
+        account_ids = [account_id for account_id in account_by_member.values() if account_id]
+        busy_by_account = {
+            connection["account_id"]: connection.get("busy_intervals", [])
+            for connection in require_database().calendar_connections.find(
+                {"account_id": {"$in": account_ids}, "sync_status": "connected"},
+                {"account_id": 1, "busy_intervals": 1},
+            )
+        }
+        busy_intervals_by_member = {
+            member_id: busy_by_account.get(account_id, [])
+            for member_id, account_id in account_by_member.items()
+            if account_id in busy_by_account
+        }
         return find_matching_times(
             member_ids=member_ids,
             availability_records=availability_records,
@@ -263,6 +491,7 @@ def create_app(database_override=None):
             latest_time=values.get("latest_time"),
             minimum_attendance=values["minimum_attendance"],
             max_results=10,
+            busy_intervals_by_member=busy_intervals_by_member,
         )
 
     def match_metadata(matches):
@@ -514,18 +743,455 @@ def create_app(database_override=None):
 
     @app.get("/")
     def index():
+        if auth_bypass():
+            return dashboard()
+        if current_user.is_authenticated:
+            return redirect(url_for("dashboard"))
+        return render_template("landing.html")
+
+    def safe_next_url(value):
+        parsed = urlsplit(value or "")
+        if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
+            return None
+        return value
+
+    def calendar_cipher():
+        key = base64.urlsafe_b64encode(
+            hashlib.sha256(app.config["SECRET_KEY"].encode("utf-8")).digest()
+        )
+        return Fernet(key)
+
+    def encrypt_calendar_secret(value):
+        return calendar_cipher().encrypt(json.dumps(value).encode("utf-8")).decode("ascii")
+
+    def decrypt_calendar_secret(value):
+        try:
+            return json.loads(calendar_cipher().decrypt(value.encode("ascii")).decode("utf-8"))
+        except (InvalidToken, ValueError, TypeError, json.JSONDecodeError):
+            raise ValueError("Saved calendar credentials are no longer available.")
+
+    def sync_calendar_connection(connection):
+        db = require_database()
+        try:
+            secret = decrypt_calendar_secret(connection["secret_ciphertext"])
+            if connection["provider"] == "ical":
+                intervals = parse_ical_busy_intervals(fetch_calendar_url(secret["url"]))
+            elif connection["provider"] == "google":
+                token = secret.get("access_token")
+                if not token:
+                    raise ValueError("Google Calendar authorization needs to be reconnected.")
+                now = utc_now()
+                response = requests.post(
+                    "https://www.googleapis.com/calendar/v3/freeBusy",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "timeMin": now.isoformat(),
+                        "timeMax": (now + timedelta(days=366)).isoformat(),
+                        "items": [{"id": "primary"}],
+                    },
+                    timeout=(3.05, 15),
+                )
+                response.raise_for_status()
+                intervals = [
+                    normalized_interval(item["start"], item["end"])
+                    for item in response.json().get("calendars", {}).get("primary", {}).get("busy", [])
+                ]
+            else:
+                raise ValueError("Unsupported calendar provider.")
+            db.calendar_connections.update_one(
+                {"_id": connection["_id"]},
+                {"$set": {
+                    "busy_intervals": intervals,
+                    "last_synced_at": utc_now(),
+                    "sync_status": "connected",
+                    "sync_error": None,
+                }},
+            )
+            return True
+        except Exception:
+            app.logger.exception("Calendar sync failed")
+            db.calendar_connections.update_one(
+                {"_id": connection["_id"]},
+                {"$set": {"sync_status": "error", "sync_error": "Calendar could not be synced."}},
+            )
+            return False
+
+    def available_google_username(profile, db):
+        raw_name = profile.get("name") or str(profile.get("email", "")).split("@", 1)[0]
+        base = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_name).strip("-_")[:40]
+        if not base or not base[0].isalnum():
+            base = "user"
+        if len(base) < 3:
+            base = f"{base}-user"[:40]
+        candidate = base
+        suffix = 2
+        while db.accounts.find_one({"normalized_username": candidate.casefold()}):
+            suffix_text = f"-{suffix}"
+            candidate = f"{base[:40 - len(suffix_text)]}{suffix_text}"
+            suffix += 1
+        return candidate
+
+    @app.route("/register", methods=["GET", "POST"])
+    def register():
+        if current_user.is_authenticated:
+            return redirect(url_for("dashboard"))
+        if request.method == "POST":
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+            confirmation = request.form.get("confirm_password", "")
+            errors = []
+            if not username:
+                errors.append("Username is required.")
+            elif not USERNAME_PATTERN.fullmatch(username):
+                errors.append(
+                    "Username must be 3–40 characters and use only letters, numbers, underscores, or hyphens."
+                )
+            if len(password) < 8:
+                errors.append("Password must be at least 8 characters.")
+            if password != confirmation:
+                errors.append("Passwords do not match.")
+            db = require_database()
+            if not errors and db.accounts.find_one({"normalized_username": username.casefold()}):
+                errors.append("Username is already taken.")
+            if errors:
+                for error in errors:
+                    flash(error, "error")
+                return render_template("register.html", username=username), 400
+            now = utc_now()
+            document = {
+                "username": username,
+                "normalized_username": username.casefold(),
+                "password_hash": generate_password_hash(password),
+                "auth_methods": ["password"],
+                "must_change_password": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+            try:
+                result = db.accounts.insert_one(document)
+            except DuplicateKeyError:
+                flash("Username is already taken.", "error")
+                return render_template("register.html", username=username), 400
+            document["_id"] = result.inserted_id
+            login_user(Account(document))
+            flash("Your account was created.", "success")
+            return redirect(url_for("dashboard"))
+        return render_template("register.html", username="")
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if current_user.is_authenticated:
+            return redirect(url_for("dashboard"))
+        next_url = safe_next_url(request.values.get("next"))
+        if request.method == "POST":
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+            account = require_database().accounts.find_one(
+                {"normalized_username": username.casefold()}
+            )
+            if not account or not account.get("password_hash") or not check_password_hash(
+                account["password_hash"], password
+            ):
+                flash("Invalid username or password.", "error")
+                return render_template("login.html", username=username, next_url=next_url), 401
+            login_user(Account(account))
+            return redirect(next_url or url_for("dashboard"))
+        return render_template("login.html", username="", next_url=next_url)
+
+    @app.post("/logout")
+    @login_required
+    def logout():
+        logout_user()
+        session.pop("_flashes", None)
+        session.pop("google_oauth_state", None)
+        flash("You have been logged out.", "success")
+        return redirect(url_for("index"))
+
+    @app.get("/auth/google")
+    def google_auth():
+        if current_user.is_authenticated:
+            return redirect(url_for("dashboard"))
+        if not app.config["GOOGLE_CLIENT_ID"] or not app.config["GOOGLE_CLIENT_SECRET"]:
+            flash("Google sign-in is not configured for this deployment.", "error")
+            return redirect(url_for("login"))
+        state = secrets.token_urlsafe(32)
+        session["google_oauth_state"] = state
+        redirect_uri = app.config["GOOGLE_REDIRECT_URI"] or url_for(
+            "google_callback", _external=True
+        )
+        return app.extensions["google_oauth_client"].authorize_redirect(
+            redirect_uri, state=state
+        )
+
+    @app.get("/auth/google/callback")
+    def google_callback():
+        if current_user.is_authenticated:
+            return redirect(url_for("dashboard"))
+        expected_state = session.pop("google_oauth_state", None)
+        received_state = request.args.get("state", "")
+        if (
+            not expected_state
+            or not received_state
+            or not secrets.compare_digest(expected_state, received_state)
+        ):
+            flash("Google sign-in could not be verified. Please try again.", "error")
+            return redirect(url_for("login"))
+        if request.args.get("error"):
+            flash("Google sign-in was cancelled or denied.", "error")
+            return redirect(url_for("login"))
+        try:
+            token = app.extensions["google_oauth_client"].authorize_access_token()
+            profile = token.get("userinfo") or {}
+            if not profile:
+                profile = app.extensions["google_oauth_client"].get("userinfo").json()
+        except Exception:
+            app.logger.exception("Google sign-in failed during the OAuth callback")
+            flash("Google sign-in failed. Please try again.", "error")
+            return redirect(url_for("login"))
+
+        google_sub = str(profile.get("sub", "")).strip()
+        google_email = str(profile.get("email", "")).strip().casefold()
+        if not google_sub or not google_email or profile.get("email_verified") is not True:
+            flash("Google did not provide a verified email address.", "error")
+            return redirect(url_for("login"))
+
+        db = require_database()
+        account_document = db.accounts.find_one({"google_sub": google_sub})
+        if not account_document:
+            email_owner = db.accounts.find_one({"google_email": google_email})
+            if email_owner:
+                flash(
+                    "That Google email is already connected to another account.", "error"
+                )
+                return redirect(url_for("login"))
+            now = utc_now()
+            username = available_google_username(profile, db)
+            account_document = {
+                "username": username,
+                "normalized_username": username.casefold(),
+                "google_sub": google_sub,
+                "google_email": google_email,
+                "auth_methods": ["google"],
+                "must_change_password": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+            try:
+                result = db.accounts.insert_one(account_document)
+            except DuplicateKeyError:
+                flash("That Google identity is already connected.", "error")
+                return redirect(url_for("login"))
+            account_document["_id"] = result.inserted_id
+        login_user(Account(account_document))
+        return redirect(url_for("dashboard"))
+
+    @app.get("/auth/google-calendar")
+    @login_required
+    def google_calendar_auth():
+        if not app.config["GOOGLE_CLIENT_ID"] or not app.config["GOOGLE_CLIENT_SECRET"]:
+            flash("Google Calendar is not configured for this deployment.", "error")
+            return redirect(url_for("account"))
+        state = secrets.token_urlsafe(32)
+        session["google_calendar_oauth_state"] = state
+        redirect_uri = app.config["GOOGLE_CALENDAR_REDIRECT_URI"] or url_for(
+            "google_calendar_callback", _external=True
+        )
+        return app.extensions["google_calendar_oauth_client"].authorize_redirect(
+            redirect_uri,
+            state=state,
+            access_type="offline",
+            prompt="consent",
+        )
+
+    @app.get("/auth/google-calendar/callback")
+    @login_required
+    def google_calendar_callback():
+        expected_state = session.pop("google_calendar_oauth_state", None)
+        received_state = request.args.get("state", "")
+        if not expected_state or not received_state or not secrets.compare_digest(expected_state, received_state):
+            flash("Google Calendar connection could not be verified.", "error")
+            return redirect(url_for("account"))
+        if request.args.get("error"):
+            flash("Google Calendar connection was cancelled or denied.", "error")
+            return redirect(url_for("account"))
+        try:
+            token = app.extensions["google_calendar_oauth_client"].authorize_access_token()
+        except Exception:
+            app.logger.exception("Google Calendar authorization failed")
+            flash("Google Calendar could not be connected.", "error")
+            return redirect(url_for("account"))
+        secret = {
+            key: token[key]
+            for key in ("access_token", "refresh_token", "expires_at", "token_type")
+            if token.get(key)
+        }
+        if not secret.get("access_token"):
+            flash("Google Calendar did not return usable authorization.", "error")
+            return redirect(url_for("account"))
+        now = utc_now()
+        db = require_database()
+        db.calendar_connections.update_one(
+            {"account_id": current_account_id(), "provider": "google"},
+            {"$set": {
+                "account_id": current_account_id(),
+                "provider": "google",
+                "secret_ciphertext": encrypt_calendar_secret(secret),
+                "sync_status": "pending",
+                "busy_intervals": [],
+                "updated_at": now,
+            }, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        connection = db.calendar_connections.find_one(
+            {"account_id": current_account_id(), "provider": "google"}
+        )
+        if sync_calendar_connection(connection):
+            flash("Google Calendar connected and synced.", "success")
+        else:
+            flash("Google Calendar was connected, but could not be synced yet.", "error")
+        return redirect(url_for("account"))
+
+    @app.post("/account/calendars/ical")
+    @login_required
+    def connect_ical_calendar():
+        raw_url = request.form.get("calendar_url", "")
+        try:
+            payload = fetch_calendar_url(raw_url)
+            intervals = parse_ical_busy_intervals(payload)
+        except (ValueError, requests.RequestException):
+            flash("That calendar URL could not be safely connected.", "error")
+            return redirect(url_for("account"))
+        now = utc_now()
+        db = require_database()
+        db.calendar_connections.update_one(
+            {"account_id": current_account_id(), "provider": "ical"},
+            {"$set": {
+                "account_id": current_account_id(),
+                "provider": "ical",
+                "secret_ciphertext": encrypt_calendar_secret({"url": raw_url}),
+                "busy_intervals": intervals,
+                "sync_status": "connected",
+                "last_synced_at": now,
+                "sync_error": None,
+                "updated_at": now,
+            }, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        flash("Personal calendar connected and synced.", "success")
+        return redirect(url_for("account"))
+
+    @app.post("/account/calendars/<connection_id>/sync")
+    @login_required
+    def sync_calendar(connection_id):
+        connection = require_database().calendar_connections.find_one(
+            {"_id": object_id(connection_id), "account_id": current_account_id()}
+        )
+        if not connection:
+            abort(404)
+        if sync_calendar_connection(connection):
+            flash("Calendar synced.", "success")
+        else:
+            flash("Calendar could not be synced. Your weekly availability is still being used.", "error")
+        return redirect(url_for("account"))
+
+    @app.post("/account/calendars/<connection_id>/disconnect")
+    @login_required
+    def disconnect_calendar(connection_id):
+        result = require_database().calendar_connections.delete_one(
+            {"_id": object_id(connection_id), "account_id": current_account_id()}
+        )
+        if not result.deleted_count:
+            abort(404)
+        flash("Calendar disconnected. Your weekly availability is unchanged.", "success")
+        return redirect(url_for("account"))
+
+    @app.get("/account")
+    @login_required
+    def account():
+        db = require_database()
+        document = db.accounts.find_one({"_id": current_account_id()})
+        if not document:
+            abort(404)
+        member = db.users.find_one({"linked_account_id": current_account_id()})
+        entries = []
+        if member:
+            entries = list(
+                db.availability.find({"user_id": member["_id"]}).sort(
+                    [("day_order", ASCENDING), ("start_time", ASCENDING)]
+                )
+            )
+        connections = list(db.calendar_connections.find({"account_id": current_account_id()}))
+        return render_template(
+            "account.html",
+            account=document,
+            member=member,
+            entries=entries,
+            days=DAYS,
+            connections=connections,
+        )
+
+    @app.post("/account/password")
+    @login_required
+    def change_password():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account:
+            abort(404)
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirmation = request.form.get("confirm_password", "")
+        if not account.get("password_hash"):
+            flash("This account currently uses Google Sign-In and does not have a password.", "error")
+            return redirect(url_for("account"))
+        if not check_password_hash(account["password_hash"], current_password):
+            flash("Current password is incorrect.", "error")
+            return redirect(url_for("account"))
+        if len(new_password) < 8:
+            flash("New password must be at least 8 characters.", "error")
+            return redirect(url_for("account"))
+        if new_password != confirmation:
+            flash("New passwords do not match.", "error")
+            return redirect(url_for("account"))
+        db.accounts.update_one(
+            {"_id": account["_id"]},
+            {"$set": {
+                "password_hash": generate_password_hash(new_password),
+                "must_change_password": False,
+                "updated_at": utc_now(),
+            }, "$addToSet": {"auth_methods": "password"}},
+        )
+        flash("Password updated successfully.", "success")
+        return redirect(url_for("account"))
+
+    @app.get("/account/availability")
+    @login_required
+    def account_availability():
+        member = ensure_account_member()
+        return redirect(url_for("member_availability", user_id=member["_id"], return_to=url_for("account")))
+
+    @app.get("/dashboard")
+    @login_required
+    def dashboard():
         groups = []
         upcoming_plans = []
         stats = {"groups": 0, "members": 0, "plans": 0}
         if database is not None:
             try:
+                group_query = account_filter("account_ids")
+                member_query = account_filter()
+                group_ids = [
+                    group["_id"] for group in database.groups.find(group_query, {"_id": 1})
+                ]
+                plan_query = {"group_id": {"$in": group_ids}}
                 stats = {
-                    "groups": database.groups.count_documents({}),
-                    "members": database.users.count_documents({}),
-                    "plans": database.plans.count_documents({}),
+                    "groups": database.groups.count_documents(group_query),
+                    "members": database.users.count_documents(member_query),
+                    "plans": database.plans.count_documents(plan_query),
                 }
-                groups = list(database.groups.find().sort("created_at", DESCENDING).limit(5))
-                all_plans = list(database.plans.find())
+                groups = list(
+                    database.groups.find(group_query).sort("created_at", DESCENDING).limit(5)
+                )
+                all_plans = list(database.plans.find(plan_query))
                 group_documents = {
                     group["_id"]: group
                     for group in database.groups.find(
@@ -545,7 +1211,9 @@ def create_app(database_override=None):
                 }
                 members_by_id = {
                     member["_id"]: member
-                    for member in database.users.find({"_id": {"$in": list(member_ids)}})
+                    for member in database.users.find(
+                        {"_id": {"$in": list(member_ids)}}
+                    )
                 }
                 for plan in all_plans:
                     plan["group_name"] = group_names.get(plan["group_id"], "Unknown group")
@@ -573,10 +1241,15 @@ def create_app(database_override=None):
         )
 
     @app.route("/users", methods=["GET", "POST"])
+    @login_required
     def users():
         db = require_database()
         group_id = request.values.get("group_id", "").strip()
         origin_group = get_group(group_id) if group_id else None
+        if request.method == "GET" and not origin_group:
+            return redirect(url_for("account"))
+        if origin_group:
+            require_group_permission(origin_group, "manage_members")
         if request.method == "POST":
             display_name = request.form.get("display_name", "").strip()
             email = request.form.get("email", "").strip().lower()
@@ -587,7 +1260,9 @@ def create_app(database_override=None):
             duplicate_queries = [{"normalized_name": display_name.casefold()}]
             if email:
                 duplicate_queries.append({"email": email})
-            existing_member = db.users.find_one({"$or": duplicate_queries})
+            existing_member = db.users.find_one(
+                {**account_filter(), "$or": duplicate_queries}
+            )
             if existing_member:
                 if origin_group:
                     db.groups.update_one(
@@ -604,6 +1279,8 @@ def create_app(database_override=None):
                 "normalized_name": display_name.casefold(),
                 "created_at": utc_now(),
             }
+            if not auth_bypass():
+                member_document["account_id"] = current_account_id()
             if email:
                 member_document["email"] = email
             try:
@@ -621,15 +1298,26 @@ def create_app(database_override=None):
                 flash(f"{display_name} was added.", "success")
             return redirect(url_for("users"))
 
-        member_list = list(db.users.find().sort("display_name", ASCENDING))
+        member_list = list(db.users.find(account_filter()).sort("display_name", ASCENDING))
         return render_template("users.html", users=member_list, origin_group=origin_group)
 
     @app.get("/groups")
+    @login_required
     def groups():
-        group_list = list(require_database().groups.find().sort("created_at", DESCENDING))
+        group_list = list(
+            require_database().groups.find(account_filter("account_ids")).sort(
+                "created_at", DESCENDING
+            )
+        )
         return render_template("groups.html", groups=group_list)
 
+    @app.get("/members")
+    @login_required
+    def members():
+        return redirect(url_for("users"))
+
     @app.route("/groups/create", methods=["GET", "POST"])
+    @login_required
     def create_group():
         if request.method == "POST":
             name = request.form.get("name", "").strip()
@@ -637,22 +1325,32 @@ def create_app(database_override=None):
             if not name:
                 flash("Group name is required.", "error")
                 return render_template("group_create.html", form=request.form), 400
-            result = require_database().groups.insert_one(
-                {
-                    "name": name,
-                    "description": description or None,
-                    "member_ids": [],
-                    "created_at": utc_now(),
-                }
-            )
+            group_document = {
+                "name": name,
+                "description": description or None,
+                "member_ids": [],
+                "created_at": utc_now(),
+            }
+            if not auth_bypass():
+                account_id = current_account_id()
+                owner_member = ensure_account_member()
+                group_document.update({
+                    "owner_account_id": account_id,
+                    "account_ids": [account_id],
+                    "account_roles": {str(account_id): "owner"},
+                    "member_ids": [owner_member["_id"]],
+                })
+            result = require_database().groups.insert_one(group_document)
             flash(f"{name} was created.", "success")
             return redirect(url_for("group_detail", group_id=result.inserted_id))
         return render_template("group_create.html")
 
     @app.route("/groups/<group_id>/edit", methods=["GET", "POST"])
+    @login_required
     def edit_group(group_id):
         db = require_database()
         group = get_group(group_id)
+        require_group_permission(group, "edit_group")
         if request.method == "POST":
             name = request.form.get("name", "").strip()
             description = request.form.get("description", "").strip()
@@ -668,11 +1366,16 @@ def create_app(database_override=None):
         return render_template("group_edit.html", group=group, form=group)
 
     @app.get("/groups/<group_id>")
+    @login_required
     def group_detail(group_id):
         db = require_database()
         group = get_group(group_id)
         member_ids = group.get("member_ids", [])
-        members = list(db.users.find({"_id": {"$in": member_ids}}).sort("display_name", ASCENDING))
+        members = list(
+            db.users.find({"_id": {"$in": member_ids}}).sort(
+                "display_name", ASCENDING
+            )
+        )
         members_by_id = {member["_id"]: member for member in members}
         entries = list(
             db.availability.find({"user_id": {"$in": member_ids}}).sort(
@@ -692,7 +1395,9 @@ def create_app(database_override=None):
             for member in members
         ]
         available_users = list(
-            db.users.find({"_id": {"$nin": member_ids}}).sort("display_name", ASCENDING)
+            db.users.find({**account_filter(), "_id": {"$nin": member_ids}}).sort(
+                "display_name", ASCENDING
+            )
         )
         plans = list(db.plans.find({"group_id": group["_id"]}))
         scheduled_plans = []
@@ -719,36 +1424,104 @@ def create_app(database_override=None):
             scheduled_plans=scheduled_plans,
             planning_plans=planning_plans,
             upcoming_plan_count=len(scheduled_plans),
+            can_manage_group=group_is_owner(group),
+            current_member_id=(
+                (db.users.find_one({"linked_account_id": current_account_id()}) or {}).get("_id")
+                if not auth_bypass()
+                else None
+            ),
         )
 
     @app.post("/groups/<group_id>/members")
+    @login_required
     def add_group_member(group_id):
         db = require_database()
         group = get_group(group_id)
+        require_group_permission(group, "manage_members")
         member_id = object_id(request.form.get("user_id"))
-        member = db.users.find_one({"_id": member_id})
-        if not member:
-            abort(404)
+        member = get_user(member_id)
         if member_id in group.get("member_ids", []):
             flash("That member is already in the group.", "error")
         else:
-            db.groups.update_one({"_id": group["_id"]}, {"$addToSet": {"member_ids": member_id}})
+            update = {"$addToSet": {"member_ids": member_id}}
+            linked_account_id = member.get("linked_account_id")
+            if linked_account_id:
+                update["$addToSet"]["account_ids"] = linked_account_id
+                update["$set"] = {
+                    f"account_roles.{linked_account_id}": "member"
+                }
+            db.groups.update_one({"_id": group["_id"]}, update)
             flash(f"{member['display_name']} was added to the group.", "success")
         return redirect(url_for("group_detail", group_id=group_id))
 
+    @app.post("/groups/<group_id>/members/<user_id>/role")
+    @login_required
+    def update_group_member_role(group_id, user_id):
+        db = require_database()
+        group = get_group(group_id)
+        require_group_owner(group)
+        member = db.users.find_one({"_id": object_id(user_id)})
+        if not member or member["_id"] not in group.get("member_ids", []):
+            abort(404)
+        target_account_id = member.get("linked_account_id")
+        if not target_account_id or target_account_id == group.get("owner_account_id"):
+            abort(403)
+        role = request.form.get("role", "member").strip().lower()
+        if role not in {"member", "admin"}:
+            abort(400)
+        permissions = [
+            permission
+            for permission in request.form.getlist("permissions")
+            if permission in ADMIN_PERMISSIONS
+        ]
+        update = {"$set": {f"account_roles.{target_account_id}": role}}
+        if role == "admin":
+            update["$set"][f"admin_permissions.{target_account_id}"] = permissions
+        else:
+            update["$unset"] = {f"admin_permissions.{target_account_id}": ""}
+        db.groups.update_one({"_id": group["_id"]}, update)
+        flash(f"{member['display_name']} is now a {role}.", "success")
+        return redirect(url_for("group_detail", group_id=group_id))
+
+    @app.post("/groups/<group_id>/members/<user_id>/remove")
+    @login_required
+    def remove_group_member(group_id, user_id):
+        db = require_database()
+        group = get_group(group_id)
+        require_group_permission(group, "manage_members")
+        member = db.users.find_one({"_id": object_id(user_id)})
+        if not member or member["_id"] not in group.get("member_ids", []):
+            abort(404)
+        if member.get("linked_account_id") == group.get("owner_account_id"):
+            flash("The group owner cannot be removed.", "error")
+        else:
+            update = {"$pull": {"member_ids": member["_id"]}}
+            linked_account_id = member.get("linked_account_id")
+            if linked_account_id:
+                update["$pull"]["account_ids"] = linked_account_id
+                update["$unset"] = {f"account_roles.{linked_account_id}": ""}
+            db.groups.update_one({"_id": group["_id"]}, update)
+            flash(f"{member['display_name']} was removed from the group.", "success")
+        return redirect(url_for("group_detail", group_id=group_id))
+
     @app.post("/groups/<group_id>/delete")
+    @login_required
     def delete_group(group_id):
         db = require_database()
         group = get_group(group_id)
+        require_group_owner(group)
         db.plans.delete_many({"group_id": group["_id"]})
         db.groups.delete_one({"_id": group["_id"]})
         flash("Group deleted successfully.", "success")
         return redirect(url_for("groups"))
 
     @app.route("/users/<user_id>/availability", methods=["GET", "POST"])
+    @login_required
     def member_availability(user_id):
         db = require_database()
         user = get_user(user_id)
+        if not member_can_manage(user):
+            abort(403)
         return_to, return_label = availability_return_context()
         editor_state = availability_editor_state()
         if request.method == "POST":
@@ -784,9 +1557,12 @@ def create_app(database_override=None):
         )
 
     @app.post("/users/<user_id>/availability/bulk-edit")
+    @login_required
     def bulk_edit_availability(user_id):
         db = require_database()
         user = get_user(user_id)
+        if not member_can_manage(user):
+            abort(403)
         return_to, _return_label = availability_return_context()
         try:
             changes = json.loads(request.form.get("availability_payload", "[]"))
@@ -831,12 +1607,16 @@ def create_app(database_override=None):
         return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
 
     @app.post("/availability/<availability_id>/edit")
+    @login_required
     def edit_availability(availability_id):
         db = require_database()
         entry_id = object_id(availability_id)
         entry = db.availability.find_one({"_id": entry_id, "user_id": {"$exists": True}})
         if not entry:
             abort(404)
+        user = get_user(entry["user_id"])
+        if not member_can_manage(user):
+            abort(403)
         values, error = validate_availability(request.form)
         if error:
             flash(error, "error")
@@ -848,20 +1628,26 @@ def create_app(database_override=None):
         return redirect(url_for("member_availability", user_id=entry["user_id"], return_to=return_to))
 
     @app.post("/availability/<availability_id>/delete")
+    @login_required
     def delete_availability(availability_id):
         db = require_database()
         entry = db.availability.find_one({"_id": object_id(availability_id), "user_id": {"$exists": True}})
         if not entry:
             abort(404)
+        user = get_user(entry["user_id"])
+        if not member_can_manage(user):
+            abort(403)
         db.availability.delete_one({"_id": entry["_id"]})
         flash("Availability window deleted.", "success")
         return_to, _return_label = availability_return_context()
         return redirect(url_for("member_availability", user_id=entry["user_id"], return_to=return_to))
 
     @app.route("/groups/<group_id>/plans/create", methods=["GET", "POST"])
+    @login_required
     def create_plan(group_id):
         db = require_database()
         group = get_group(group_id)
+        require_group_permission(group, "manage_plans")
         group_size = len(group.get("member_ids", []))
         if request.method == "POST":
             values, errors = validate_plan_form(request.form, group_size)
@@ -888,8 +1674,10 @@ def create_app(database_override=None):
         return render_template("plan_create.html", group=group)
 
     @app.post("/groups/<group_id>/schedule-preview")
+    @login_required
     def schedule_preview(group_id):
         group = get_group(group_id)
+        require_group_permission(group, "manage_plans")
         values, errors = validate_plan_form(
             request.form, len(group.get("member_ids", [])), require_title=False
         )
@@ -915,6 +1703,7 @@ def create_app(database_override=None):
         return jsonify({"success": True, "results": results})
 
     @app.get("/plans/<plan_id>")
+    @login_required
     def plan_detail(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
@@ -922,9 +1711,9 @@ def create_app(database_override=None):
         if not group:
             abort(404)
         group_members = list(
-            db.users.find({"_id": {"$in": group.get("member_ids", [])}}).sort(
-                "display_name", ASCENDING
-            )
+            db.users.find({
+                "_id": {"$in": group.get("member_ids", [])},
+            }).sort("display_name", ASCENDING)
         )
         members_by_id = {member["_id"]: member for member in group_members}
         members = plan_members(plan, group, members_by_id)
@@ -947,15 +1736,23 @@ def create_app(database_override=None):
             eligible_invitees=eligible_invitees,
             event_time_options=event_time_options(plan),
             rsvp_time_defaults=rsvp_time_defaults(plan),
+            can_manage_group=group_is_owner(group),
+            current_member_id=(
+                (db.users.find_one({"linked_account_id": current_account_id()}) or {}).get("_id")
+                if not auth_bypass()
+                else None
+            ),
         )
 
     @app.route("/plans/<plan_id>/edit", methods=["GET", "POST"])
+    @login_required
     def edit_plan(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
         group = db.groups.find_one({"_id": plan["group_id"]})
         if not group:
             abort(404)
+        require_group_permission(group, "manage_plans")
 
         if request.method == "POST":
             values, errors = validate_plan_form(request.form, len(group.get("member_ids", [])))
@@ -984,9 +1781,14 @@ def create_app(database_override=None):
         return render_template("plan_edit.html", plan=plan, group=group, form=plan)
 
     @app.post("/plans/<plan_id>/schedule")
+    @login_required
     def schedule_plan(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
+        group = db.groups.find_one({"_id": plan["group_id"]})
+        if not group:
+            abort(404)
+        require_group_permission(group, "manage_plans")
         try:
             match_index = int(request.form.get("match_index", ""))
             if match_index < 0:
@@ -1036,6 +1838,7 @@ def create_app(database_override=None):
         return redirect(url_for("plan_detail", plan_id=plan["_id"]))
 
     @app.post("/plans/<plan_id>/invite")
+    @login_required
     def invite_plan_member(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
@@ -1045,9 +1848,10 @@ def create_app(database_override=None):
         group = db.groups.find_one({"_id": plan["group_id"]})
         if not group:
             abort(404)
+        require_group_permission(group, "manage_plans")
         member_id = object_id(request.form.get("member_id"))
-        member = db.users.find_one({"_id": member_id})
-        if not member or member_id not in group.get("member_ids", []):
+        member = get_user(member_id)
+        if member_id not in group.get("member_ids", []):
             abort(404)
         if member_id in plan_member_ids(plan, group):
             flash("That member is already invited to this plan.", "error")
@@ -1059,6 +1863,7 @@ def create_app(database_override=None):
         return redirect(url_for("plan_detail", plan_id=plan["_id"]))
 
     @app.post("/plans/<plan_id>/rsvp")
+    @login_required
     def update_rsvp(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
@@ -1071,6 +1876,11 @@ def create_app(database_override=None):
         member_id = object_id(request.form.get("member_id"))
         if member_id not in plan_member_ids(plan, group):
             abort(404)
+        member = db.users.find_one({"_id": member_id})
+        if not member:
+            abort(404)
+        if not group_is_owner(group) and member.get("linked_account_id") != current_account_id():
+            abort(403)
 
         status = request.form.get("status", "").strip()
         allowed_statuses = {"attending", "not_attending"}
@@ -1136,10 +1946,15 @@ def create_app(database_override=None):
         return redirect(url_for("plan_detail", plan_id=plan["_id"]))
 
     @app.post("/plans/<plan_id>/delete")
+    @login_required
     def delete_plan(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
         group_id = plan["group_id"]
+        group = db.groups.find_one({"_id": group_id})
+        if not group:
+            abort(404)
+        require_group_permission(group, "manage_plans")
         db.plans.delete_one({"_id": plan["_id"]})
         flash("Plan deleted successfully.", "success")
         if db.groups.find_one({"_id": group_id}):
@@ -1147,12 +1962,14 @@ def create_app(database_override=None):
         return redirect(url_for("groups"))
 
     @app.post("/plans/<plan_id>/find-times")
+    @login_required
     def find_plan_times(plan_id):
         db = require_database()
         plan = get_plan(plan_id)
         group = db.groups.find_one({"_id": plan["group_id"]})
         if not group:
             abort(404)
+        require_group_permission(group, "manage_plans")
         was_scheduled = has_confirmed_schedule(plan)
         if was_scheduled:
             db.plans.update_one(
@@ -1180,10 +1997,12 @@ def create_app(database_override=None):
         return redirect(url_for("plan_detail", plan_id=plan_id))
 
     @app.get("/results")
+    @login_required
     def results():
         return redirect(url_for("groups"))
 
     @app.post("/submit")
+    @login_required
     def submit():
         flash("Create or choose a member before adding recurring availability.", "error")
         return redirect(url_for("users"))

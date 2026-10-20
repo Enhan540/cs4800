@@ -10,6 +10,10 @@ Finding a meeting time for a group is often an awkward exchange of messages. Peo
 
 ## Current MVP features
 
+- Create private accounts with a username and securely hashed password.
+- Sign in with Google using OpenID Connect identity scopes (`openid email profile`) without requesting Google Calendar access.
+- Keep dashboards, groups, members, availability, and plans scoped to the authenticated account.
+- Support an explicit, idempotent migration that links legacy `guest#` member profiles to authenticated accounts while preserving schedules, memberships, plans, and RSVPs.
 - Create, edit, view, and delete groups with optional descriptions.
 - Create reusable members with optional email addresses and add them to multiple groups.
 - Save multiple recurring weekly availability windows per member and day.
@@ -30,14 +34,14 @@ Finding a meeting time for a group is often an awkward exchange of messages. Peo
 These are intentionally outside the current MVP:
 
 - Plan voting or preference collection.
-- Accounts, login, authentication, and authorization.
-- Private groups and invitation permissions.
+- Cross-account group invitations and role-management UI.
 - Google, Apple, or Outlook calendar integration.
 - Notifications, chat, maps, mobile clients, and fairness scoring.
 
 ## Technology stack
 
 - Python 3.11+ and Flask 3.1.
+- Flask-Login for authenticated sessions and Authlib for Google OpenID Connect.
 - Jinja2 templates with HTML, CSS, and vanilla JavaScript.
 - MongoDB Atlas with PyMongo.
 - `mongomock` and `pytest` for isolated tests.
@@ -59,6 +63,7 @@ Vercel-hosted Flask application
     |
     v
 MongoDB Atlas
+    +--> accounts
     +--> users
     +--> groups
     +--> availability
@@ -70,7 +75,7 @@ GitHub push / pull request
 GitHub Actions --> pytest -q
 ```
 
-The application currently uses a single Flask entry point. MongoDB stores separate collections rather than putting all application data into one document. The scheduling algorithm is kept in `services/scheduling_service.py` instead of inside a route handler.
+The application currently uses a single Flask entry point. Authentication identities live in the `accounts` collection; reusable scheduling members remain in `users` and are scoped by `account_id`. A migrated member also stores `linked_account_id`, while its account stores `legacy_member_id`, `migration_source`, and `must_change_password`. Groups record `owner_account_id`, associated account IDs, and account roles. Legacy records are not automatically assigned to ordinary newly registered accounts. The scheduling algorithm is kept in `services/scheduling_service.py` instead of inside a route handler.
 
 ## Repository structure
 
@@ -79,8 +84,14 @@ app.py
 services/
   __init__.py
   scheduling_service.py
+scripts/
+  migrate_guest_accounts.py
 templates/
   base.html
+  landing.html
+  login.html
+  register.html
+  account.html
   index.html
   users.html
   groups.html
@@ -150,10 +161,14 @@ Copy `.env.example` to `.env` and replace the placeholder values:
 MONGO_URI=mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority
 MONGO_DB_NAME=cs4800_database
 SECRET_KEY=replace-with-a-long-random-value
+GOOGLE_CLIENT_ID=replace-with-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=replace-with-google-oauth-client-secret
+GOOGLE_REDIRECT_URI=http://127.0.0.1:5000/auth/google/callback
+SESSION_COOKIE_SECURE=false
 PORT=5000
 ```
 
-`FLASK_SECRET_KEY` is accepted as a backwards-compatible alternative to `SECRET_KEY`. `MONGO_URI` and `SECRET_KEY` must never be committed. `.env` is ignored by Git; `.env.example` contains placeholders only.
+`FLASK_SECRET_KEY` is accepted as a backwards-compatible alternative to `SECRET_KEY`. Use the same stable `SECRET_KEY` for every instance of one deployment so signed login sessions remain valid. Different local and production environments may use different keys. Set `SESSION_COOKIE_SECURE=true` for HTTPS production deployments; leave it false for plain-HTTP local development. `MONGO_URI`, `SECRET_KEY`, and `GOOGLE_CLIENT_SECRET` must never be committed. `.env` is ignored by Git; `.env.example` contains placeholders only.
 
 In MongoDB Atlas, create a database user with `readWrite` access to the value used for `MONGO_DB_NAME`, and allow the development machine's IP address in Network Access. Avoid using a broad `0.0.0.0/0` rule unless it is temporary and understood.
 
@@ -164,6 +179,33 @@ python app.py
 ```
 
 Open <http://localhost:5000>. Data persists in MongoDB Atlas after refreshes and application restarts.
+
+### 6. Configure Google Sign-In
+
+In Google Cloud Console, create an OAuth 2.0 Client ID with application type **Web application**. Add the exact callback URLs used by each environment under **Authorized redirect URIs**, for example:
+
+- `http://127.0.0.1:5000/auth/google/callback` for local development
+- `https://your-production-domain.example/auth/google/callback` for production
+
+Copy the client ID and client secret into the corresponding environment variables, and set `GOOGLE_REDIRECT_URI` to the exact authorized callback for that environment. Configure the OAuth consent screen as required by Google. Group Planner requests only basic OpenID Connect identity scopes during sign-in; do not add Google Calendar scopes for this authentication flow.
+
+### 7. Migrate legacy guest accounts
+
+The migration detects member names matching `guest#` (for example, `guest1`) without assuming a fixed count. It creates linked accounts with temporary migration credentials, preserves the existing member IDs and all records that reference them, and assigns `guest1` as owner of legacy groups. It does not run during Flask startup.
+
+Always review the dry run first:
+
+```bash
+python scripts/migrate_guest_accounts.py --dry-run
+```
+
+Then run the controlled migration once:
+
+```bash
+python scripts/migrate_guest_accounts.py
+```
+
+The command is idempotent and can safely resume after a completed run. It reports usernames and record counts but never prints passwords, hashes, connection strings, or OAuth credentials. Migrated accounts have `must_change_password: true`; ordinary password and Google accounts have it set to false.
 
 ## Typical demo workflow
 
@@ -184,13 +226,13 @@ Run the complete suite from the repository root:
 pytest -q
 ```
 
-The tests cover route validation, group/member/availability/plan workflows, date and duration handling, plan lifecycle and dashboard filtering, RSVP behavior, and the scheduling service. Scheduling tests include the three-person overlap case, no overlap, minimum attendance, durations that are too long, and multiple overlapping availability blocks.
+The tests cover password authentication, mocked Google authentication, OAuth state validation, guest migration and idempotency, owner/member authorization, cross-account privacy, route validation, group/member/availability/plan workflows, date and duration handling, plan lifecycle and dashboard filtering, RSVP behavior, and the scheduling service. Scheduling tests include the three-person overlap case, no overlap, minimum attendance, durations that are too long, and multiple overlapping availability blocks.
 
 ## Deployment
 
 ### Vercel
 
-The current production hosting target is Vercel. Connect the GitHub repository to a Vercel project, configure the same environment variables in the Vercel project settings, and deploy from the intended production branch. Do not put `MONGO_URI` or `SECRET_KEY` in the repository or in frontend code. After deployment, replace the placeholder live URL near the top of this README with the actual public Vercel URL.
+The current production hosting target is Vercel. Connect the GitHub repository to a Vercel project, configure `MONGO_URI`, `MONGO_DB_NAME`, `SECRET_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, the production `GOOGLE_REDIRECT_URI`, and `SESSION_COOKIE_SECURE=true` in the Vercel project settings, and deploy from the intended production branch. Startup fails on Vercel if `SECRET_KEY` is missing. The production callback must use the deployed HTTPS domain and must exactly match a Google Cloud authorized redirect URI. Do not put secrets in the repository or frontend code. After deployment, replace the placeholder live URL near the top of this README with the actual public Vercel URL.
 
 The repository does not currently commit a `vercel.json` or a production URL, so the Vercel project settings are the source of truth for the live deployment configuration.
 
@@ -223,7 +265,8 @@ Do not commit those values. EC2 deployment is not required for the current Verce
 - Use a dedicated MongoDB database user with only the required `readWrite` access.
 - Restrict MongoDB Atlas Network Access to known IP addresses where practical.
 - Keep GitHub and Vercel secrets in their secret-management settings.
-- This MVP intentionally has no authentication or authorization, so it should not be treated as a private production system until those features are added.
+- Rotate exposed credentials immediately, use HTTPS in production, and keep the OAuth callback URI list narrow.
+- Google Sign-In stores the stable Google subject and verified email for identity matching; OAuth access and refresh tokens are not persisted.
 
 ## Project status
 

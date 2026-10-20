@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Create account | Group Planner{% endblock %}
+{% block content %}
+<section class="auth-shell"><div class="card auth-card"><p class="eyebrow">Join Group Planner</p><h1>Create your account</h1><p class="muted auth-intro">Start with an empty workspace built around your groups.</p>
+  <form method="post" class="auth-form">
+    <label for="username">Username<input id="username" name="username" value="{{ username }}" minlength="3" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,39}" required autocomplete="username" autofocus><span class="field-help">3–40 characters; letters, numbers, underscores, and hyphens.</span></label>
+    <label for="password">Password<span class="password-control"><input id="password" name="password" type="password" minlength="8" required autocomplete="new-password" data-password-input><button type="button" class="password-toggle" aria-label="Show password" aria-pressed="false" data-password-toggle>Show</button></span></label>
+    <label for="confirm_password">Confirm Password<span class="password-control"><input id="confirm_password" name="confirm_password" type="password" minlength="8" required autocomplete="new-password" data-password-input><button type="button" class="password-toggle" aria-label="Show password" aria-pressed="false" data-password-toggle>Show</button></span></label>
+    <button class="button auth-submit" type="submit">Create Account</button>
+  </form>
+  <div class="auth-divider"><span>or</span></div>
+  <a class="button google-button" href="{{ url_for('google_auth') }}"><span class="google-mark" aria-hidden="true">G</span>Continue with Google</a>
+  <p class="auth-switch">Already have an account? <a href="{{ url_for('login') }}">Log In</a></p>
+</div></section>
+{% endblock %}

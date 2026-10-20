@@ -3,8 +3,8 @@
 {% block content %}
 <a class="back-link" href="{{ url_for('groups') }}">← Back to Groups</a>
 <section class="narrow-page with-back-link">
-  <p class="eyebrow">New group</p><h1>Create a recurring group</h1>
-  <section class="card">
+  <p class="eyebrow">New group</p><h1>Create a recurring group</h1><p class="muted">Bring members together around one shared weekly schedule.</p>
+  <section class="card form-card">
     <form method="post">
       <label for="name">Group name<input id="name" name="name" maxlength="120" required value="{{ form.get('name', '') if form else '' }}"></label>
       <label for="description">Description <span class="optional">optional</span><textarea id="description" name="description" rows="4" maxlength="500">{{ form.get('description', '') if form else '' }}</textarea></label>

@@ -14,7 +14,7 @@ from app import create_app
 def app_and_db():
     database = mongomock.MongoClient().meetwise_test
     app = create_app(database_override=database)
-    app.config.update(TESTING=True, SECRET_KEY="test-secret")
+    app.config.update(TESTING=True, SECRET_KEY="test-secret", LOGIN_DISABLED=True)
     return app, database
 
 

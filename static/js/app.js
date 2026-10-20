@@ -1,4 +1,17 @@
 document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll("[data-password-toggle]").forEach((button) => {
+    const input = button.closest(".password-control")?.querySelector("[data-password-input]");
+    if (!input) return;
+    button.addEventListener("click", () => {
+      const showing = input.type === "text";
+      input.type = showing ? "password" : "text";
+      button.textContent = showing ? "Show" : "Hide";
+      button.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+      button.setAttribute("aria-pressed", String(!showing));
+      input.focus();
+    });
+  });
+
   document.querySelectorAll("form[data-confirm]").forEach((form) => {
     form.addEventListener("submit", (event) => {
       if (!window.confirm(form.dataset.confirm)) event.preventDefault();

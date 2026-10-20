@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Group Planner | Find time together{% endblock %}
+{% block content %}
+<section class="public-hero">
+  <div class="public-hero-copy">
+    <span class="status-badge attending">Start hanging out</span>
+    <p class="eyebrow">Scheduling for real groups</p>
+    <h1>Plans happen when finding time feels easy.</h1>
+    <p class="public-lead">Group Planner combines everyone’s recurring availability, surfaces the strongest meeting windows, and keeps RSVPs in one calm place.</p>
+    <div class="button-row"><a class="button" href="{{ url_for('register') }}">Get Started</a><a class="button secondary" href="{{ url_for('login') }}">Log In</a></div>
+  </div>
+  <div class="card public-preview" aria-label="Group Planner feature preview">
+    <span class="pill">Friday Friends</span>
+    <h2>Movie Night &amp; Pizza</h2>
+    <p class="muted">Saturday · 6:00 PM–9:00 PM</p>
+    <div class="preview-availability"><span></span><span></span><span></span><span></span><span></span></div>
+    <div class="public-preview-result"><span class="status-badge attending">Time found</span><strong>5 of 6 available</strong></div>
+  </div>
+</section>
+<section class="public-features" aria-label="How Group Planner works">
+  <article class="card"><span class="feature-number">1</span><h2>Share availability</h2><p class="muted">Save reusable weekly windows for every person in the group.</p></article>
+  <article class="card"><span class="feature-number">2</span><h2>Find the overlap</h2><p class="muted">Compare schedules and rank the strongest options automatically.</p></article>
+  <article class="card"><span class="feature-number">3</span><h2>Confirm the plan</h2><p class="muted">Schedule a time, invite members, and collect clear RSVPs.</p></article>
+</section>
+{% endblock %}

@@ -4,8 +4,8 @@
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
 <section class="narrow-page with-back-link">
   <p class="eyebrow">Group settings</p>
-  <h1>Edit group</h1>
-  <section class="card">
+  <h1>Edit group</h1><p class="muted">Update the group name and description without changing its members or plans.</p>
+  <section class="card form-card">
     <form method="post">
       <label for="name">Group name<input id="name" name="name" required maxlength="120" value="{{ form.get('name', '') }}"></label>
       <label for="description">Description <span class="optional">optional</span><textarea id="description" name="description" rows="4">{{ form.get('description') or '' }}</textarea></label>
