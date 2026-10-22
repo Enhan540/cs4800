@@ -1856,6 +1856,7 @@ def create_app(database_override=None):
             return_to=return_to,
             return_label=return_label,
             editor_state=editor_state,
+            can_edit_availability=member_can_manage(user),
         )
 
     @app.post("/users/<user_id>/availability/bulk-edit")

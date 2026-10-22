@@ -27,8 +27,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
   const unsavedDialog = document.querySelector("[data-unsaved-dialog]");
-  const askDiscardChanges = () => new Promise((resolve) => {
-    if (!unsavedDialog) { resolve(window.confirm("You have changes that haven't been saved.")); return; }
+  const askUnsaved = (message) => new Promise((resolve) => {
+    if (!unsavedDialog) { resolve(window.confirm(message)); return; }
+    unsavedDialog.querySelector("[data-unsaved-message]").textContent = message;
     const finish = (discard) => { unsavedDialog.close(); resolve(discard); };
     unsavedDialog.querySelector("[data-unsaved-keep]").onclick = () => finish(false);
     unsavedDialog.querySelector("[data-unsaved-discard]").onclick = () => finish(true);
@@ -39,7 +40,7 @@ document.addEventListener("DOMContentLoaded", () => {
     return Boolean(form && dialog.dataset.originalForm !== new URLSearchParams(new FormData(form)).toString());
   };
   const closeMemberDialog = async (dialog) => {
-    if (memberDialogDirty(dialog) && !await askDiscardChanges()) return;
+    if (memberDialogDirty(dialog) && !await askUnsaved("You have changes that haven't been saved.")) return;
     dialog.close();
   };
   document.querySelectorAll("[data-dialog-close]").forEach((button) => {
@@ -140,6 +141,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const dialogPeriod = dialog?.querySelector("[data-picker-period]");
   let activeTimeInput = null;
   let originalTimeValue = "";
+  const pickerParent = dialog?.parentNode;
+  const pickerNextSibling = dialog?.nextSibling;
+  let embeddedPickerOwner = null;
   const setDialogTime = (minutes) => {
     dialogHour.value = String(Math.floor((minutes % 720) / 60) || 12);
     dialogMinute.value = String(minutes % 60).padStart(2, "0");
@@ -155,13 +159,29 @@ document.addEventListener("DOMContentLoaded", () => {
     setDialogTime(parseTime(input.value) ?? 540);
     const bounds = input.getBoundingClientRect();
     dialog.hidden = false;
-    dialog.style.width = `${Math.max(280, bounds.width)}px`;
-    dialog.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - dialog.offsetWidth - 8))}px`;
-    const spaceBelow = window.innerHeight - bounds.bottom;
-    if (spaceBelow >= dialog.offsetHeight + 12) {
-      dialog.style.top = `${bounds.bottom + 6}px`;
-    } else {
-      dialog.style.top = `${Math.max(8, bounds.top - dialog.offsetHeight - 6)}px`;
+    const availabilityOwner = input.closest("[data-availability-window-dialog]");
+    if (availabilityOwner) {
+      availabilityOwner.appendChild(dialog);
+      embeddedPickerOwner = availabilityOwner;
+      dialog.style.position = "absolute";
+      dialog.style.width = `${Math.max(280, bounds.width)}px`;
+      const ownerBounds = availabilityOwner.getBoundingClientRect();
+      const left = Math.max(0, Math.min(
+        bounds.left - ownerBounds.left,
+        availabilityOwner.clientWidth - dialog.offsetWidth - 16,
+      ));
+      dialog.style.left = `${left}px`;
+      dialog.style.top = `${bounds.bottom - ownerBounds.top + 8}px`;
+    }
+    if (!availabilityOwner) {
+      dialog.style.width = `${Math.max(280, bounds.width)}px`;
+      dialog.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - dialog.offsetWidth - 8))}px`;
+      const spaceBelow = window.innerHeight - bounds.bottom;
+      if (spaceBelow >= dialog.offsetHeight + 12) {
+        dialog.style.top = `${bounds.bottom + 6}px`;
+      } else {
+        dialog.style.top = `${Math.max(8, bounds.top - dialog.offsetHeight - 6)}px`;
+      }
     }
   };
   const closePicker = (accept, restoreOriginal = true) => {
@@ -174,6 +194,15 @@ document.addEventListener("DOMContentLoaded", () => {
       activeTimeInput.value = originalTimeValue;
     }
     dialog.hidden = true;
+    if (embeddedPickerOwner && pickerParent) {
+      if (pickerNextSibling && pickerNextSibling.parentNode === pickerParent) pickerParent.insertBefore(dialog, pickerNextSibling);
+      else pickerParent.appendChild(dialog);
+      embeddedPickerOwner = null;
+      dialog.style.position = "";
+      dialog.style.width = "";
+      dialog.style.left = "";
+      dialog.style.top = "";
+    }
     activeTimeInput = null;
     originalTimeValue = "";
   };
@@ -331,6 +360,71 @@ document.addEventListener("DOMContentLoaded", () => {
       dirty = false;
       bulkForm.requestSubmit();
     });
+  });
+
+  const windowDialog = document.querySelector("[data-availability-window-dialog]");
+  const windowForm = windowDialog?.querySelector("[data-availability-window-form]");
+  const windowStart = windowForm?.querySelector("[data-window-start]");
+  const windowEnd = windowForm?.querySelector("[data-window-end]");
+  const closeWindowDialog = () => {
+    if (!windowDialog) return;
+    closePicker(false);
+    windowDialog.close();
+  };
+  document.querySelectorAll("[data-availability-window]").forEach((block) => {
+    block.addEventListener("click", () => {
+      if (!windowDialog || !windowForm) return;
+      closeWindowDialog();
+      windowForm.action = windowDialog.dataset.editUrlTemplate.replace("ENTRY_ID", block.dataset.entryId);
+      windowForm.querySelector("[data-window-day]").value = block.dataset.day;
+      windowStart.value = block.dataset.startTime;
+      windowEnd.value = block.dataset.endTime;
+      windowStart.setCustomValidity("");
+      windowEnd.setCustomValidity("");
+      windowDialog.querySelector("#availability-window-title").textContent = `Edit Availability · ${block.dataset.day}`;
+      windowDialog.showModal();
+    });
+  });
+  windowDialog?.querySelector("[data-window-dialog-close]")?.addEventListener("click", closeWindowDialog);
+  windowDialog?.querySelector("[data-window-dialog-cancel]")?.addEventListener("click", closeWindowDialog);
+  dialog?.addEventListener("click", (event) => event.stopPropagation());
+  dialog?.addEventListener("pointerdown", (event) => event.stopPropagation());
+  windowDialog?.addEventListener("pointerdown", (event) => {
+    if (activeTimeInput && embeddedPickerOwner === windowDialog
+      && !dialog.contains(event.target) && event.target !== activeTimeInput) {
+      closePicker(true);
+    }
+    if (event.target === windowDialog) {
+      closeWindowDialog();
+      return;
+    }
+    event.stopPropagation();
+  });
+  windowDialog?.addEventListener("click", (event) => {
+    if (event.target === windowDialog) closeWindowDialog();
+    else event.stopPropagation();
+  });
+  windowDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+  });
+  windowForm?.addEventListener("submit", (event) => {
+    const startMinutes = parseTime(windowStart.value);
+    const endMinutes = parseTime(windowEnd.value);
+    if (startMinutes === null || endMinutes === null) {
+      event.preventDefault();
+      const invalid = startMinutes === null ? windowStart : windowEnd;
+      invalid.setCustomValidity("Please enter a time in 5-minute increments.");
+      invalid.reportValidity();
+      return;
+    }
+    windowStart.value = formatTime(startMinutes);
+    windowEnd.value = formatTime(endMinutes);
+    if (endMinutes <= startMinutes) {
+      event.preventDefault();
+      windowEnd.setCustomValidity("End time must be later than start time.");
+      windowEnd.reportValidity();
+      windowEnd.setCustomValidity("");
+    }
   });
 
   const planForm = document.querySelector("form[data-schedule-preview-url]");

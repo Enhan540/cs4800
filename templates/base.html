@@ -50,6 +50,7 @@
   </div>
   <dialog class="app-dialog unsaved-dialog" data-unsaved-dialog aria-labelledby="unsaved-dialog-title">
     <div class="dialog-heading"><div><p class="eyebrow">Unsaved Changes</p><h2 id="unsaved-dialog-title">You have changes that haven't been saved.</h2></div></div>
+    <p data-unsaved-message>These changes have not been saved.</p>
     <div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div>
   </dialog>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>

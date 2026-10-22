@@ -1158,3 +1158,44 @@ def test_rsvp_page_uses_stable_details_and_action_regions(app_and_db):
     assert "data-rsvp-details" in page
     assert "rsvp-action" in page
     assert "data-time-picker-trigger" not in page
+
+
+def test_weekly_blocks_map_to_persisted_windows_and_single_window_edit(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
+    first_id, second_id = [database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": start, "end_time": end, "status": "available",
+    }).inserted_id for start, end in (("09:00", "10:00"), ("13:00", "15:00"))]
+
+    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+    assert f'data-entry-id="{first_id}"' in page
+    assert f'data-entry-id="{second_id}"' in page
+    assert 'data-start-time="01:00 PM"' in page
+    assert 'data-end-time="03:00 PM"' in page
+
+    response = app.test_client().post(
+        f"/availability/{second_id}/edit",
+        data={"day": "Monday", "start_time": "02:00 PM", "end_time": "04:00 PM"},
+    )
+    assert response.status_code == 302
+    assert database.availability.find_one({"_id": first_id})["start_time"] == "09:00"
+    updated = database.availability.find_one({"_id": second_id})
+    assert updated["start_time"] == "14:00"
+    assert updated["end_time"] == "16:00"
+
+
+def test_single_window_edit_rejects_invalid_range_without_writing(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
+    entry_id = database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": "09:00", "end_time": "10:00", "status": "available",
+    }).inserted_id
+    response = app.test_client().post(
+        f"/availability/{entry_id}/edit",
+        data={"day": "Monday", "start_time": "11:00 AM", "end_time": "10:00 AM"},
+    )
+    assert response.status_code == 302
+    saved = database.availability.find_one({"_id": entry_id})
+    assert (saved["start_time"], saved["end_time"]) == ("09:00", "10:00")

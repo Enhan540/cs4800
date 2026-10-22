@@ -313,6 +313,15 @@ tr:last-child td { border-bottom: 0; }
 .matrix-member a { margin-top: .25rem; font-size: .72rem; text-transform: none; letter-spacing: 0; }
 .availability-matrix td { background: #fbfdff; }
 .availability-window { display: block; margin-bottom: .38rem; border: 1px solid #86efac; border-radius: var(--radius-sm); background: var(--success-soft); color: var(--success); padding: .36rem .45rem; font-size: .75rem; font-weight: 700; text-align: center; white-space: nowrap; }
+.availability-window-block { position: absolute; right: .18rem; left: .18rem; z-index: 1; min-height: 2px; margin: 0; padding: 0; cursor: pointer; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+.availability-window-block:hover, .availability-window-block:focus-visible { border-color: #059669; background: #a7f3d0; box-shadow: 0 0 0 3px rgba(16, 185, 129, .18); outline: none; }
+.availability-window-dialog { position: relative; width: min(36rem, calc(100% - 2rem)); min-height: 30rem; max-height: none; overflow: visible; }
+.availability-window-dialog form { display: grid; min-height: 23rem; align-content: space-between; gap: 1rem; }
+.availability-window-dialog form[data-availability-window-form] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.availability-window-dialog form[data-availability-window-form] .dialog-actions,
+.availability-window-dialog form[data-availability-window-form] .time-picker-popover { grid-column: 1 / -1; }
+.availability-window-dialog .dialog-actions { justify-content: flex-end; margin-top: 0; }
+.availability-window-dialog .time-picker-popover { z-index: 30; margin-top: 0; box-shadow: var(--shadow-overlay); }
 .availability-window:last-child { margin-bottom: 0; }
 .no-availability { display: block; color: var(--text-muted); padding: .36rem; text-align: center; }
 .plan-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
@@ -461,6 +470,10 @@ tr:last-child td { border-bottom: 0; }
   .compact-actions > * { flex: 1 1 200px; }
   .compact-actions .button { width: 100%; }
   .compact-member-form { right: auto; left: 0; }
+  .availability-window-dialog form[data-availability-window-form] { grid-template-columns: 1fr; }
+  .availability-window-dialog form[data-availability-window-form] .dialog-actions,
+  .availability-window-dialog form[data-availability-window-form] .time-picker-popover { grid-column: 1; }
+  .availability-window-dialog { width: calc(100% - 2rem); min-height: 31rem; }
   .availability-row { align-items: stretch; flex-direction: column; }
   .current-availability [data-availability-readonly] { grid-template-columns: 1fr; }
   .time-picker-grid { grid-template-columns: 1fr; }
