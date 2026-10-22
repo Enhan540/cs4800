@@ -81,3 +81,21 @@ def test_overlapping_multiple_blocks_are_merged():
 def test_invalid_durations_are_rejected(duration):
     with pytest.raises(ValueError):
         find([], duration=duration)
+
+
+def test_calendar_busy_interval_is_subtracted_from_recurring_availability():
+    matches = find_matching_times(
+        member_ids=["A"],
+        availability_records=[block("A", "18:00", "21:00")],
+        start_date="2026-10-23",
+        end_date="2026-10-23",
+        duration_minutes=60,
+        minimum_attendance=1,
+        busy_intervals_by_member={
+            "A": [{"start": "2026-10-23T19:00:00", "end": "2026-10-23T20:00:00"}]
+        },
+    )
+    assert [(match["start_time"], match["end_time"]) for match in matches] == [
+        ("18:00", "19:00"),
+        ("20:00", "21:00"),
+    ]

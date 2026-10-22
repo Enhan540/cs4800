@@ -21,6 +21,7 @@
         <nav class="main-nav" aria-label="Main navigation">
           <a class="nav-link{% if request.endpoint == 'dashboard' %} is-active{% endif %}" href="{{ url_for('dashboard') }}"{% if request.endpoint == 'dashboard' %} aria-current="page"{% endif %}>Dashboard</a>
           <a class="nav-link{% if request.endpoint in ['groups', 'create_group', 'edit_group', 'group_detail', 'create_plan', 'edit_plan', 'plan_detail'] %} is-active{% endif %}" href="{{ url_for('groups') }}"{% if request.endpoint in ['groups', 'create_group', 'edit_group', 'group_detail', 'create_plan', 'edit_plan', 'plan_detail'] %} aria-current="page"{% endif %}>My Groups</a>
+          <a class="nav-link{% if request.endpoint in ['account_availability', 'member_availability', 'bulk_edit_availability'] %} is-active{% endif %}" href="{{ url_for('account_availability') }}"{% if request.endpoint in ['account_availability', 'member_availability', 'bulk_edit_availability'] %} aria-current="page"{% endif %}>Availability</a>
           <details class="user-menu"><summary class="account-avatar" aria-label="Open user menu">{{ current_user.username[:2]|upper }}<span aria-hidden="true">▾</span></summary><div class="user-menu-panel"><strong>{{ current_user.username }}</strong><a href="{{ url_for('account') }}">Account</a><form method="post" action="{{ url_for('logout') }}"><button type="submit">Log Out</button></form></div></details>
         </nav>
       {% else %}
@@ -47,6 +48,10 @@
       <div class="time-wheel-controls"><label>Hour<select data-picker-hour>{% for hour in range(1, 13) %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}</select></label><label>Minute<select data-picker-minute>{% for minute in range(0, 60, 5) %}<option value="{{ '%02d'|format(minute) }}">{{ '%02d'|format(minute) }}</option>{% endfor %}</select></label><label>Period<select data-picker-period><option>AM</option><option>PM</option></select></label></div>
       <div class="button-row"><button class="button secondary" type="button" data-picker-cancel>Cancel</button><button class="button" type="button" data-picker-ok>OK</button></div>
   </div>
+  <dialog class="app-dialog unsaved-dialog" data-unsaved-dialog aria-labelledby="unsaved-dialog-title">
+    <div class="dialog-heading"><div><p class="eyebrow">Unsaved Changes</p><h2 id="unsaved-dialog-title">You have changes that haven't been saved.</h2></div></div>
+    <div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div>
+  </dialog>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

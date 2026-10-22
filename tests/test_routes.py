@@ -547,8 +547,32 @@ def test_rsvp_attendance_display_and_counts(app_and_db):
     assert "2/4 attending" in page
     assert "Attending" in page
     assert "Arriving at 8:00 PM" in page
-    assert "Not attending" in page
-    assert "Awaiting response" in page
+    assert "Not Attending" in page
+    assert "Pending" in page
+
+
+def test_pending_rsvp_clears_partial_attendance_data(app_and_db):
+    app, database = app_and_db
+    _group_id, plan_id, member_id = make_six_to_ten_plan(database)
+    client = app.test_client()
+    client.post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id), "status": "attending",
+        "arriving_late": "on", "arrival_time": "20:00",
+    })
+    client.post(f"/plans/{plan_id}/rsvp", data={
+        "member_id": str(member_id), "status": "pending",
+        "arriving_late": "on", "arrival_time": "20:00",
+    })
+    saved = database.plans.find_one({"_id": plan_id})["rsvps"][str(member_id)]
+    assert saved["status"] == "pending"
+    assert "arriving_late" not in saved
+    assert "arrival_time" not in saved
+
+
+def test_dashboard_does_not_offer_global_member_creation(app_and_db):
+    app, _database = app_and_db
+    page = app.test_client().get("/dashboard").get_data(as_text=True)
+    assert "Add Members" not in page
 
 
 def add_preview_availability(database, member_id, start, end):
@@ -968,8 +992,8 @@ def test_availability_back_link_preserves_group_or_member_parent(app_and_db):
     assert f'return_to=/groups/{group_id}' in group_page
     assert f'href="/groups/{group_id}"' in availability_page
     assert "Back to Friday Friends" in availability_page
-    assert 'href="/users"' in members_page
-    assert "Back to Members" in members_page
+    assert 'href="/dashboard"' in members_page
+    assert "Back to Dashboard" in members_page
 
 
 def test_group_planning_contains_create_plan_and_branding_is_updated(app_and_db):

@@ -12,10 +12,13 @@ Finding a meeting time for a group is often an awkward exchange of messages. Peo
 
 - Create private accounts with a username and securely hashed password.
 - Sign in with Google using OpenID Connect identity scopes (`openid email profile`) without requesting Google Calendar access.
+- Connect Google Calendar separately, with a dedicated consent flow limited to free/busy data; Google sign-in alone never grants calendar access.
+- Connect one HTTPS iCalendar/iCal feed per account. Calendar URLs and OAuth tokens are encrypted before storage, feeds are fetched server-side with redirect/size/private-network protections, and only normalized busy intervals are used for scheduling.
 - Keep dashboards, groups, members, availability, and plans scoped to the authenticated account.
 - Support an explicit, idempotent migration that links legacy `guest#` member profiles to authenticated accounts while preserving schedules, memberships, plans, and RSVPs.
 - Create, edit, view, and delete groups with optional descriptions.
-- Create reusable members with optional email addresses and add them to multiple groups.
+- Manage reusable members from each group; there is no standalone Members navigation page.
+- Assign group Owner, Admin, or Member roles. Owners retain full control; Admin permissions can independently manage members, edit the group, edit availability, edit RSVP responses, and manage plans.
 - Save multiple recurring weekly availability windows per member and day.
 - Use a unified typed/time-picker editor with five-minute availability precision.
 - Edit or remove availability individually or in a batch.
@@ -25,6 +28,7 @@ Finding a meeting time for a group is often an awkward exchange of messages. Peo
 - Support arbitrary positive whole-minute meeting durations and clearly label shorter alternatives when no full-duration match exists.
 - Schedule a selected result and keep the confirmed time in MongoDB.
 - Invite group members to scheduled plans and record attending/not-attending RSVP responses, including optional late-arrival and early-departure times.
+- Let each member update their own RSVP while limiting edits to another member's RSVP to authorized group roles.
 - Show planning and upcoming scheduled plans separately; the dashboard shows only scheduled plans that have not ended.
 - Provide validation, flash messages, and 404/500/503 error pages.
 - Run automated tests locally and in GitHub Actions.
@@ -34,14 +38,13 @@ Finding a meeting time for a group is often an awkward exchange of messages. Peo
 These are intentionally outside the current MVP:
 
 - Plan voting or preference collection.
-- Cross-account group invitations and role-management UI.
-- Google, Apple, or Outlook calendar integration.
+- Apple or Outlook calendar integration.
 - Notifications, chat, maps, mobile clients, and fairness scoring.
 
 ## Technology stack
 
 - Python 3.11+ and Flask 3.1.
-- Flask-Login for authenticated sessions and Authlib for Google OpenID Connect.
+- Flask-Login for authenticated sessions, Authlib for Google OpenID Connect and optional Calendar consent, and Fernet encryption for saved calendar secrets.
 - Jinja2 templates with HTML, CSS, and vanilla JavaScript.
 - MongoDB Atlas with PyMongo.
 - `mongomock` and `pytest` for isolated tests.
@@ -68,6 +71,7 @@ MongoDB Atlas
     +--> groups
     +--> availability
     +--> plans
+    +--> calendar_connections
 
 GitHub push / pull request
     |
@@ -84,6 +88,7 @@ app.py
 services/
   __init__.py
   scheduling_service.py
+  calendar_service.py
 scripts/
   migrate_guest_accounts.py
 templates/
@@ -110,6 +115,7 @@ tests/
   __init__.py
   test_routes.py
   test_scheduling_service.py
+  test_calendar_service.py
 .github/workflows/deploy.yml
 .env.example
 requirements.txt
@@ -164,11 +170,14 @@ SECRET_KEY=replace-with-a-long-random-value
 GOOGLE_CLIENT_ID=replace-with-google-oauth-client-id
 GOOGLE_CLIENT_SECRET=replace-with-google-oauth-client-secret
 GOOGLE_REDIRECT_URI=http://127.0.0.1:5000/auth/google/callback
+GOOGLE_CALENDAR_REDIRECT_URI=http://127.0.0.1:5000/auth/google-calendar/callback
 SESSION_COOKIE_SECURE=false
 PORT=5000
 ```
 
-`FLASK_SECRET_KEY` is accepted as a backwards-compatible alternative to `SECRET_KEY`. Use the same stable `SECRET_KEY` for every instance of one deployment so signed login sessions remain valid. Different local and production environments may use different keys. Set `SESSION_COOKIE_SECURE=true` for HTTPS production deployments; leave it false for plain-HTTP local development. `MONGO_URI`, `SECRET_KEY`, and `GOOGLE_CLIENT_SECRET` must never be committed. `.env` is ignored by Git; `.env.example` contains placeholders only.
+`FLASK_SECRET_KEY` is accepted as a backwards-compatible alternative to `SECRET_KEY`. Use the same stable `SECRET_KEY` for every instance of one deployment so signed login sessions and encrypted calendar connection secrets remain valid. Different local and production environments may use different keys, but changing a deployed key invalidates existing sessions and requires calendar connections to be reconnected. Set `SESSION_COOKIE_SECURE=true` for HTTPS production deployments; leave it false for plain-HTTP local development. `MONGO_URI`, `SECRET_KEY`, `GOOGLE_CLIENT_SECRET`, OAuth refresh tokens, and calendar-feed URLs must never be committed. `.env` is ignored by Git; `.env.example` contains placeholders only.
+
+For Google Calendar, add the calendar callback above to the same Google OAuth client used for sign-in. The connection requests only `calendar.events.freebusy`, and the application queries the signed-in account's primary calendar. Configure matching local and deployed redirect URIs in Google Cloud Console before attempting a connection.
 
 In MongoDB Atlas, create a database user with `readWrite` access to the value used for `MONGO_DB_NAME`, and allow the development machine's IP address in Network Access. Avoid using a broad `0.0.0.0/0` rule unless it is temporary and understood.
 

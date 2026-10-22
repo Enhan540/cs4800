@@ -1,4 +1,102 @@
 document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll(".user-menu").forEach((menu) => {
+    document.addEventListener("click", (event) => {
+      if (!menu.contains(event.target)) menu.open = false;
+    });
+    menu.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { menu.open = false; menu.querySelector("summary")?.focus(); }
+    });
+  });
+
+  document.querySelectorAll("[data-card-href]").forEach((card) => {
+    const navigate = () => { window.location.href = card.dataset.cardHref; };
+    card.addEventListener("click", (event) => {
+      if (!event.target.closest("a, button, input, select, textarea, details, summary, form")) navigate();
+    });
+    card.addEventListener("keydown", (event) => {
+      if ((event.key === "Enter" || event.key === " ") && event.target === card) { event.preventDefault(); navigate(); }
+    });
+  });
+
+  document.querySelectorAll("[data-dialog-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = document.getElementById(button.dataset.dialogOpen);
+      target?.showModal();
+      const form = target?.querySelector("form[data-member-editor-form]");
+      if (form && target) target.dataset.originalForm = new URLSearchParams(new FormData(form)).toString();
+    });
+  });
+  const unsavedDialog = document.querySelector("[data-unsaved-dialog]");
+  const askDiscardChanges = () => new Promise((resolve) => {
+    if (!unsavedDialog) { resolve(window.confirm("You have changes that haven't been saved.")); return; }
+    const finish = (discard) => { unsavedDialog.close(); resolve(discard); };
+    unsavedDialog.querySelector("[data-unsaved-keep]").onclick = () => finish(false);
+    unsavedDialog.querySelector("[data-unsaved-discard]").onclick = () => finish(true);
+    unsavedDialog.showModal();
+  });
+  const memberDialogDirty = (dialog) => {
+    const form = dialog?.querySelector("form[data-member-editor-form]");
+    return Boolean(form && dialog.dataset.originalForm !== new URLSearchParams(new FormData(form)).toString());
+  };
+  const closeMemberDialog = async (dialog) => {
+    if (memberDialogDirty(dialog) && !await askDiscardChanges()) return;
+    dialog.close();
+  };
+  document.querySelectorAll("[data-dialog-close]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const dialog = button.closest("dialog");
+      if (dialog?.matches("[data-member-dialog]")) closeMemberDialog(dialog);
+      else dialog?.close();
+    });
+  });
+  document.querySelectorAll("[data-member-cancel]").forEach((button) => {
+    button.addEventListener("click", () => closeMemberDialog(button.closest("dialog")));
+  });
+  document.querySelectorAll("[data-member-dialog]").forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) closeMemberDialog(dialog);
+    });
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeMemberDialog(dialog);
+    });
+  });
+  document.querySelectorAll("form[data-member-editor-form]").forEach((form) => {
+    const permissions = form.querySelector("[data-admin-permissions]");
+    const role = form.elements.role;
+    if (!permissions || !role) return;
+    const updatePermissionsVisibility = () => { permissions.hidden = role.value !== "admin"; };
+    role.addEventListener("change", updatePermissionsVisibility);
+    updatePermissionsVisibility();
+  });
+
+  document.querySelectorAll("input[data-invite-search]").forEach((input) => {
+    const results = input.closest("form")?.querySelector("[data-invite-results]");
+    let timer = null;
+    input.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      const query = input.value.trim();
+      if (query.length < 2) { results.innerHTML = ""; return; }
+      timer = window.setTimeout(async () => {
+        try {
+          const response = await fetch(`${input.dataset.inviteSearch}?q=${encodeURIComponent(query)}`, { headers: { Accept: "application/json" } });
+          const payload = await response.json();
+          results.innerHTML = payload.results.length ? payload.results.map((item) => {
+            const label = item.state === "member" ? "Already a member" : item.state === "pending" ? "Already invited" : "Invite";
+            const action = item.state === "available" ? `<button type="button" data-invite-username="${item.username}">${label}</button>` : `<span class="muted small">${label}</span>`;
+            return `<div class="invite-search-result"><span>${item.username}</span>${action}</div>`;
+          }).join("") : '<p class="muted small">No matching accounts.</p>';
+          results.querySelectorAll("[data-invite-username]").forEach((button) => button.addEventListener("click", () => {
+            input.value = button.dataset.inviteUsername;
+            results.innerHTML = `<p class="muted small">Selected ${button.dataset.inviteUsername}. Send the invitation to continue.</p>`;
+          }));
+        } catch (_error) {
+          results.innerHTML = '<p class="muted small">Search is temporarily unavailable.</p>';
+        }
+      }, 220);
+    });
+  });
+
   document.querySelectorAll("[data-password-toggle]").forEach((button) => {
     const input = button.closest(".password-control")?.querySelector("[data-password-input]");
     if (!input) return;
@@ -135,6 +233,7 @@ document.addEventListener("DOMContentLoaded", () => {
       departureField.hidden = !attending || !early.checked;
       if (!attending || !late.checked) arrival.value = "";
       if (!attending || !early.checked) departure.value = "";
+      if (status.value === "pending") { late.checked = false; early.checked = false; }
     };
     late.addEventListener("change", () => {
       if (late.checked && !arrival.value) arrival.value = form.dataset.arrivalDefault;
@@ -207,9 +306,16 @@ document.addEventListener("DOMContentLoaded", () => {
       edit.hidden = enabled; cancel.hidden = !enabled; save.hidden = !enabled;
     };
     edit.addEventListener("click", () => editMode(true));
-    cancel.addEventListener("click", () => window.location.reload());
+    let dirty = false;
+    const markDirty = () => { dirty = true; };
+    bulkForm.addEventListener("input", markDirty);
+    bulkForm.addEventListener("change", markDirty);
+    cancel.addEventListener("click", async () => {
+      if (dirty && !await askUnsaved("You have unsaved availability changes. Discard them?")) return;
+      window.location.reload();
+    });
     current.querySelectorAll("[data-remove-availability]").forEach((button) => button.addEventListener("click", () => {
-      const row = button.closest("[data-availability-entry]"); row.dataset.deleted = "true"; row.hidden = true;
+      const row = button.closest("[data-availability-entry]"); row.dataset.deleted = "true"; row.hidden = true; dirty = true;
     }));
     save.addEventListener("click", () => {
       const changes = Array.from(bulkForm.querySelectorAll("[data-availability-entry]")).map((row) => ({
@@ -222,6 +328,7 @@ document.addEventListener("DOMContentLoaded", () => {
         window.alert("Please enter all times in 5-minute increments before saving."); return;
       }
       bulkForm.querySelector("[data-availability-payload]").value = JSON.stringify(changes);
+      dirty = false;
       bulkForm.requestSubmit();
     });
   });

@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet, InvalidToken
 import requests
 
 from services.calendar_service import fetch_calendar_url, normalized_interval, parse_ical_busy_intervals
+from services.conflict_service import effective_plan_interval, intervals_overlap
 from services.scheduling_service import DAYS, find_matching_times, parse_date, parse_time
 
 load_dotenv()
@@ -106,11 +107,19 @@ def create_app(database_override=None):
             database.accounts.create_index("normalized_username", unique=True)
             database.accounts.create_index("google_sub", unique=True, sparse=True)
             database.accounts.create_index("google_email", unique=True, sparse=True)
+            database.calendar_connections.create_index(
+                [("account_id", ASCENDING), ("provider", ASCENDING)], unique=True
+            )
             database.availability.create_index(
                 [("user_id", ASCENDING), ("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
             database.groups.create_index("created_at")
             database.plans.create_index([("group_id", ASCENDING), ("created_at", DESCENDING)])
+            database.group_invites.create_index(
+                [("group_id", ASCENDING), ("invited_user_id", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"status": "pending"},
+            )
         except PyMongoError:
             app.logger.exception("Unable to create MongoDB indexes during startup")
 
@@ -219,7 +228,10 @@ def create_app(database_override=None):
         return bool(
             require_database().groups.find_one(
                 {
-                    "account_ids": current_account_id(),
+                    "$or": [
+                        {"owner_account_id": current_account_id()},
+                        {"account_ids": current_account_id()},
+                    ],
                     "member_ids": member["_id"],
                 },
                 {"_id": 1},
@@ -229,11 +241,17 @@ def create_app(database_override=None):
     def member_can_manage(member):
         if auth_bypass() or member.get("account_id") == current_account_id():
             return True
+        groups = require_database().groups.find({
+            "$or": [
+                {"owner_account_id": current_account_id()},
+                {"account_ids": current_account_id()},
+            ],
+            "member_ids": member["_id"],
+        })
         return any(
-            has_group_permission(group, "edit_member_availability")
-            for group in require_database().groups.find(
-                {"account_ids": current_account_id(), "member_ids": member["_id"]}
-            )
+            group.get("owner_account_id") == current_account_id()
+            or has_group_permission(group, "edit_member_availability")
+            for group in groups
         )
 
     def get_user(user_id):
@@ -376,9 +394,11 @@ def create_app(database_override=None):
         requested = request.values.get("return_to", "").strip()
         parsed = urlsplit(requested)
         if not requested or parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
-            return url_for("users"), "Members"
-        if parsed.path == url_for("users"):
-            return url_for("users"), "Members"
+            return url_for("dashboard"), "Dashboard"
+        if parsed.path == url_for("account"):
+            return url_for("account"), "Account"
+        if parsed.path in {url_for("users"), url_for("members")}:
+            return url_for("dashboard"), "Dashboard"
 
         group_prefix = "/groups/"
         if parsed.path.startswith(group_prefix):
@@ -393,7 +413,7 @@ def create_app(database_override=None):
                 and parsed.path == url_for("group_detail", group_id=group["_id"])
             ):
                 return url_for("group_detail", group_id=group["_id"]), group["name"]
-        return url_for("users"), "Members"
+        return url_for("dashboard"), "Dashboard"
 
     def availability_editor_state():
         selected_day = request.values.get("selected_day", DAYS[0]).strip()
@@ -457,7 +477,7 @@ def create_app(database_override=None):
             errors.append("Please enter valid allowed times.")
         return values, errors
 
-    def calculate_matches(group, values):
+    def calculate_matches(group, values, exclude_plan_id=None):
         member_ids = group.get("member_ids", [])
         availability_records = list(
             require_database().availability.find({"user_id": {"$in": member_ids}})
@@ -469,18 +489,65 @@ def create_app(database_override=None):
             str(member["_id"]): member.get("linked_account_id") for member in member_documents
         }
         account_ids = [account_id for account_id in account_by_member.values() if account_id]
-        busy_by_account = {
-            connection["account_id"]: connection.get("busy_intervals", [])
-            for connection in require_database().calendar_connections.find(
+        busy_by_account = {}
+        for connection in require_database().calendar_connections.find(
                 {"account_id": {"$in": account_ids}, "sync_status": "connected"},
                 {"account_id": 1, "busy_intervals": 1},
+            ):
+            busy_by_account.setdefault(connection["account_id"], []).extend(
+                connection.get("busy_intervals", [])
             )
-        }
         busy_intervals_by_member = {
             member_id: busy_by_account.get(account_id, [])
             for member_id, account_id in account_by_member.items()
             if account_id in busy_by_account
         }
+        # Treat existing RSVP-aware Group Planner events like calendar busy time.
+        # Pending events are included conservatively; Not Attending is excluded.
+        if account_ids:
+            account_member_documents = list(
+                require_database().users.find(
+                    {"$or": [{"linked_account_id": {"$in": account_ids}}, {"account_id": {"$in": account_ids}}]},
+                    {"_id": 1, "linked_account_id": 1, "account_id": 1},
+                )
+            )
+            member_ids_by_account = {}
+            for document in account_member_documents:
+                linked = document.get("linked_account_id") or document.get("account_id")
+                if linked:
+                    member_ids_by_account.setdefault(linked, []).append(document["_id"])
+            all_account_member_ids = [
+                member_id for ids in member_ids_by_account.values() for member_id in ids
+            ]
+            committed_group_ids = [
+                item["_id"] for item in require_database().groups.find(
+                    {"member_ids": {"$in": all_account_member_ids}}, {"_id": 1}
+                )
+            ]
+            for scheduled_plan in require_database().plans.find({
+                "group_id": {"$in": committed_group_ids},
+                "status": "scheduled",
+                **({"_id": {"$ne": exclude_plan_id}} if exclude_plan_id else {}),
+            }):
+                scheduled_group = require_database().groups.find_one(
+                    {"_id": scheduled_plan["group_id"]}, {"member_ids": 1}
+                ) or {}
+                scheduled_member_ids = plan_member_ids(scheduled_plan, scheduled_group)
+                for account_id, member_ids in member_ids_by_account.items():
+                    scheduled_member_id = next(
+                        (member_id for member_id in scheduled_member_ids if member_id in member_ids),
+                        None,
+                    )
+                    if not scheduled_member_id:
+                        continue
+                    interval = effective_plan_interval(scheduled_plan, scheduled_member_id)
+                    if interval:
+                        for target_member_id in account_by_member:
+                            if account_by_member[target_member_id] == account_id:
+                                busy_intervals_by_member.setdefault(target_member_id, []).append({
+                                    "start": interval["start"],
+                                    "end": interval["end"],
+                                })
         return find_matching_times(
             member_ids=member_ids,
             availability_records=availability_records,
@@ -506,7 +573,7 @@ def create_app(database_override=None):
         }
 
     def refresh_plan_matches(plan, group):
-        matches = calculate_matches(group, plan)
+        matches = calculate_matches(group, plan, exclude_plan_id=plan["_id"])
         metadata = match_metadata(matches)
         require_database().plans.update_one(
             {"_id": plan["_id"]}, {"$set": metadata}
@@ -547,6 +614,62 @@ def create_app(database_override=None):
     def plan_member_ids(plan, group):
         invited = plan.get("invited_member_ids")
         return invited if invited is not None else group.get("member_ids", [])
+
+    def get_user_plan_conflicts(plan, member_id):
+        """Return authorized, RSVP-aware conflicts for one member on a plan."""
+        current_interval = effective_plan_interval(plan, member_id)
+        if not current_interval:
+            return []
+        db = require_database()
+        member = db.users.find_one({"_id": member_id})
+        if not member:
+            return []
+        account_id = member.get("linked_account_id") or member.get("account_id")
+        if not account_id and not auth_bypass():
+            return []
+        account_members = list(
+            db.users.find(
+                {"$or": [{"linked_account_id": account_id}, {"account_id": account_id}]},
+                {"_id": 1},
+            )
+        ) if account_id else []
+        account_member_ids = [item["_id"] for item in account_members]
+        group_query = {"member_ids": {"$in": account_member_ids}}
+        if not auth_bypass():
+            group_query = {
+                "$and": [
+                    group_query,
+                    {"$or": [{"owner_account_id": account_id}, {"account_ids": account_id}]},
+                ]
+            }
+        group_ids = [group["_id"] for group in db.groups.find(group_query, {"_id": 1})]
+        conflicts = []
+        for other in db.plans.find({
+            "_id": {"$ne": plan["_id"]},
+            "group_id": {"$in": group_ids},
+            "status": "scheduled",
+        }):
+            other_group = db.groups.find_one({"_id": other["group_id"]}, {"member_ids": 1}) or {}
+            other_member_id = next(
+                (candidate for candidate in plan_member_ids(other, other_group) if candidate in account_member_ids),
+                None,
+            )
+            if not other_member_id:
+                continue
+            other_interval = effective_plan_interval(other, other_member_id)
+            if not other_interval or not intervals_overlap(
+                current_interval["start"], current_interval["end"],
+                other_interval["start"], other_interval["end"],
+            ):
+                continue
+            conflicts.append({
+                "plan": other,
+                "interval": other_interval,
+                "overlap_start": max(current_interval["start"], other_interval["start"]),
+                "overlap_end": min(current_interval["end"], other_interval["end"]),
+            })
+        conflicts.sort(key=lambda item: item["interval"]["start"])
+        return conflicts
 
     def plan_members(plan, group, members_by_id):
         return [
@@ -597,12 +720,13 @@ def create_app(database_override=None):
             "leaving_early": 0,
             "arriving_late_leaving_early": 0,
             "not_attending": 0,
+            "pending": 0,
             "no_response": 0,
         }
         rows = []
         for member in members:
             response = responses.get(str(member["_id"]), {})
-            status = response.get("status", "no_response")
+            status = response.get("status", "pending")
             # Read legacy top-level partial statuses as the new Attending +
             # modifier shape so existing saved RSVP documents stay usable.
             arriving_late = response.get("arriving_late", False) or status in {
@@ -613,8 +737,10 @@ def create_app(database_override=None):
             }
             if status in {"arriving_late", "leaving_early", "arriving_late_leaving_early"}:
                 status = "attending"
-            if status not in {"attending", "not_attending", "no_response"}:
-                status = "no_response"
+            if status == "no_response":
+                status = "pending"
+            if status not in {"attending", "not_attending", "pending"}:
+                status = "pending"
             counts[status] += 1
             if status == "attending" and arriving_late and leaving_early:
                 counts["arriving_late_leaving_early"] += 1
@@ -635,7 +761,7 @@ def create_app(database_override=None):
                 ),
             })
         counts["overall_attending"] = counts["attending"]
-        counts["pending"] = counts["no_response"]
+        counts["pending"] = counts["pending"] + counts["no_response"]
         return {"counts": counts, "rows": rows}
 
     def clear_scheduled_fields():
@@ -791,6 +917,36 @@ def create_app(database_override=None):
                     },
                     timeout=(3.05, 15),
                 )
+                if response.status_code == 401 and secret.get("refresh_token"):
+                    refresh = requests.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": app.config["GOOGLE_CLIENT_ID"],
+                            "client_secret": app.config["GOOGLE_CLIENT_SECRET"],
+                            "refresh_token": secret["refresh_token"],
+                            "grant_type": "refresh_token",
+                        },
+                        timeout=(3.05, 15),
+                    )
+                    refresh.raise_for_status()
+                    token = refresh.json().get("access_token")
+                    if not token:
+                        raise ValueError("Google Calendar authorization needs to be reconnected.")
+                    secret["access_token"] = token
+                    db.calendar_connections.update_one(
+                        {"_id": connection["_id"]},
+                        {"$set": {"secret_ciphertext": encrypt_calendar_secret(secret)}},
+                    )
+                    response = requests.post(
+                        "https://www.googleapis.com/calendar/v3/freeBusy",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "timeMin": now.isoformat(),
+                            "timeMax": (now + timedelta(days=366)).isoformat(),
+                            "items": [{"id": "primary"}],
+                        },
+                        timeout=(3.05, 15),
+                    )
                 response.raise_for_status()
                 intervals = [
                     normalized_interval(item["start"], item["end"])
@@ -1112,21 +1268,10 @@ def create_app(database_override=None):
         document = db.accounts.find_one({"_id": current_account_id()})
         if not document:
             abort(404)
-        member = db.users.find_one({"linked_account_id": current_account_id()})
-        entries = []
-        if member:
-            entries = list(
-                db.availability.find({"user_id": member["_id"]}).sort(
-                    [("day_order", ASCENDING), ("start_time", ASCENDING)]
-                )
-            )
         connections = list(db.calendar_connections.find({"account_id": current_account_id()}))
         return render_template(
             "account.html",
             account=document,
-            member=member,
-            entries=entries,
-            days=DAYS,
             connections=connections,
         )
 
@@ -1174,6 +1319,7 @@ def create_app(database_override=None):
     def dashboard():
         groups = []
         upcoming_plans = []
+        pending_invitations = []
         stats = {"groups": 0, "members": 0, "plans": 0}
         if database is not None:
             try:
@@ -1230,6 +1376,30 @@ def create_app(database_override=None):
                 for group in groups:
                     group["upcoming_plan_count"] = upcoming_counts.get(group["_id"], 0)
                 upcoming_plans = upcoming_plans[:6]
+                pending_invitations = list(
+                    database.group_invites.find(
+                        {"invited_user_id": current_account_id(), "status": "pending"}
+                    ).sort("created_at", DESCENDING)
+                )
+                invitation_group_ids = [invite["group_id"] for invite in pending_invitations]
+                invitation_groups = {
+                    group["_id"]: group
+                    for group in database.groups.find({"_id": {"$in": invitation_group_ids}})
+                }
+                inviter_ids = [invite["invited_by_user_id"] for invite in pending_invitations]
+                inviters = {
+                    account["_id"]: account
+                    for account in database.accounts.find({"_id": {"$in": inviter_ids}})
+                }
+                pending_invitations = [
+                    {
+                        **invite,
+                        "group": invitation_groups.get(invite["group_id"]),
+                        "inviter": inviters.get(invite["invited_by_user_id"]),
+                    }
+                    for invite in pending_invitations
+                    if invitation_groups.get(invite["group_id"])
+                ]
             except PyMongoError:
                 app.logger.exception("Unable to load dashboard data")
                 flash("Some dashboard data could not be loaded.", "error")
@@ -1238,6 +1408,7 @@ def create_app(database_override=None):
             stats=stats,
             groups=groups,
             upcoming_plans=upcoming_plans,
+            pending_invitations=pending_invitations,
         )
 
     @app.route("/users", methods=["GET", "POST"])
@@ -1249,6 +1420,10 @@ def create_app(database_override=None):
         if request.method == "GET" and not origin_group:
             return redirect(url_for("account"))
         if origin_group:
+            # The UI no longer links here. Keep this POST-only compatibility path
+            # for old unlinked migration records; authenticated accounts use invites.
+            if request.method == "GET":
+                return redirect(url_for("group_detail", group_id=origin_group["_id"]))
             require_group_permission(origin_group, "manage_members")
         if request.method == "POST":
             display_name = request.form.get("display_name", "").strip()
@@ -1394,11 +1569,6 @@ def create_app(database_override=None):
             {"member": member, "days": availability_by_member[member["_id"]]}
             for member in members
         ]
-        available_users = list(
-            db.users.find({**account_filter(), "_id": {"$nin": member_ids}}).sort(
-                "display_name", ASCENDING
-            )
-        )
         plans = list(db.plans.find({"group_id": group["_id"]}))
         scheduled_plans = []
         planning_plans = []
@@ -1418,13 +1588,19 @@ def create_app(database_override=None):
             "group_detail.html",
             group=group,
             members=members,
-            available_users=available_users,
             availability_days=DAYS,
             availability_rows=availability_rows,
             scheduled_plans=scheduled_plans,
             planning_plans=planning_plans,
             upcoming_plan_count=len(scheduled_plans),
             can_manage_group=group_is_owner(group),
+            can_invite=group_is_owner(group) or has_group_permission(group, "manage_members"),
+            can_assign_roles=group_is_owner(group),
+            permissions={
+                permission: has_group_permission(group, permission)
+                for permission in ADMIN_PERMISSIONS
+            },
+            current_group_role=group_role(group),
             current_member_id=(
                 (db.users.find_one({"linked_account_id": current_account_id()}) or {}).get("_id")
                 if not auth_bypass()
@@ -1442,17 +1618,138 @@ def create_app(database_override=None):
         member = get_user(member_id)
         if member_id in group.get("member_ids", []):
             flash("That member is already in the group.", "error")
+        elif member.get("linked_account_id"):
+            flash("Use an account invitation to add this user to the group.", "error")
         else:
+            # Preserve the ability to keep old, unlinked migration records usable.
             update = {"$addToSet": {"member_ids": member_id}}
-            linked_account_id = member.get("linked_account_id")
-            if linked_account_id:
-                update["$addToSet"]["account_ids"] = linked_account_id
-                update["$set"] = {
-                    f"account_roles.{linked_account_id}": "member"
-                }
             db.groups.update_one({"_id": group["_id"]}, update)
-            flash(f"{member['display_name']} was added to the group.", "success")
+            flash(f"Legacy member {member['display_name']} was added to the group.", "success")
         return redirect(url_for("group_detail", group_id=group_id))
+
+    @app.get("/groups/<group_id>/invitations/search")
+    @login_required
+    def search_group_invitation_accounts(group_id):
+        db = require_database()
+        group = get_group(group_id)
+        require_group_permission(group, "manage_members")
+        query = request.args.get("q", "").strip()
+        if len(query) < 2:
+            return jsonify({"results": []})
+        accounts = list(
+            db.accounts.find(
+                {
+                    "normalized_username": {"$regex": re.escape(query.casefold())},
+                    "_id": {"$ne": current_account_id()},
+                },
+                {"username": 1},
+            ).sort("normalized_username", ASCENDING).limit(10)
+        )
+        member_account_ids = set(group.get("account_ids", []))
+        pending_account_ids = {
+            invite["invited_user_id"]
+            for invite in db.group_invites.find(
+                {"group_id": group["_id"], "status": "pending"},
+                {"invited_user_id": 1},
+            )
+        }
+        return jsonify({
+            "results": [
+                {
+                    "id": str(account["_id"]),
+                    "username": account["username"],
+                    "state": (
+                        "member" if account["_id"] in member_account_ids
+                        else "pending" if account["_id"] in pending_account_ids
+                        else "available"
+                    ),
+                }
+                for account in accounts
+            ]
+        })
+
+    @app.post("/groups/<group_id>/invitations")
+    @login_required
+    def invite_group_account(group_id):
+        db = require_database()
+        group = get_group(group_id)
+        require_group_permission(group, "manage_members")
+        username = request.form.get("username", "").strip()
+        account = db.accounts.find_one({"normalized_username": username.casefold()})
+        if not account:
+            flash("No account was found for that username.", "error")
+            return redirect(url_for("group_detail", group_id=group_id))
+        account_id = account["_id"]
+        if account_id == current_account_id():
+            flash("You are already in this group.", "error")
+        elif account_id in group.get("account_ids", []):
+            flash("This user is already a member of the group.", "error")
+        elif db.group_invites.find_one(
+            {"group_id": group["_id"], "invited_user_id": account_id, "status": "pending"}
+        ):
+            flash("This user has already been invited.", "error")
+        else:
+            invite = {
+                "group_id": group["_id"],
+                "invited_user_id": account_id,
+                "invited_by_user_id": current_account_id(),
+                "status": "pending",
+                "created_at": utc_now(),
+                "responded_at": None,
+                "token": None,
+            }
+            try:
+                db.group_invites.insert_one(invite)
+            except DuplicateKeyError:
+                flash("This user has already been invited.", "error")
+            else:
+                flash(f"Invitation sent to {account['username']}.", "success")
+        return redirect(url_for("group_detail", group_id=group_id))
+
+    def respond_to_group_invitation(invitation_id, status):
+        db = require_database()
+        invite = db.group_invites.find_one({"_id": object_id(invitation_id)})
+        if not invite or invite.get("invited_user_id") != current_account_id():
+            abort(404)
+        if invite.get("status") != "pending":
+            flash("This invitation has already been answered.", "error")
+            return redirect(url_for("dashboard"))
+        group = db.groups.find_one({"_id": invite.get("group_id")})
+        if not group:
+            db.group_invites.update_one(
+                {"_id": invite["_id"], "status": "pending"},
+                {"$set": {"status": "declined", "responded_at": utc_now()}},
+            )
+            flash("That group no longer exists.", "error")
+            return redirect(url_for("dashboard"))
+        if status == "accepted":
+            member = ensure_account_member()
+            db.groups.update_one(
+                {"_id": group["_id"], "account_ids": {"$ne": current_account_id()}},
+                {"$addToSet": {"member_ids": member["_id"], "account_ids": current_account_id()},
+                 "$set": {f"account_roles.{current_account_id()}": "member"}},
+            )
+        result = db.group_invites.update_one(
+            {"_id": invite["_id"], "invited_user_id": current_account_id(), "status": "pending"},
+            {"$set": {"status": status, "responded_at": utc_now()}},
+        )
+        if result.modified_count != 1:
+            flash("This invitation has already been answered.", "error")
+        elif status == "accepted":
+            flash(f"You joined {group['name']}.", "success")
+        else:
+            flash("Invitation declined.", "success")
+        return redirect(url_for("dashboard"))
+
+    @app.post("/invitations/<invitation_id>/accept")
+    @login_required
+    def accept_group_invitation(invitation_id):
+        return respond_to_group_invitation(invitation_id, "accepted")
+
+    @app.post("/invitations/<invitation_id>/decline")
+    @login_required
+    def decline_group_invitation(invitation_id):
+        return respond_to_group_invitation(invitation_id, "declined")
 
     @app.post("/groups/<group_id>/members/<user_id>/role")
     @login_required
@@ -1494,6 +1791,11 @@ def create_app(database_override=None):
             abort(404)
         if member.get("linked_account_id") == group.get("owner_account_id"):
             flash("The group owner cannot be removed.", "error")
+        elif (
+            not group_is_owner(group)
+            and group_role(group, member.get("linked_account_id")) == "admin"
+        ):
+            flash("Admins cannot remove another admin.", "error")
         else:
             update = {"$pull": {"member_ids": member["_id"]}}
             linked_account_id = member.get("linked_account_id")
@@ -1727,21 +2029,33 @@ def create_app(database_override=None):
             except ValueError as exc:
                 flash(f"Scheduling options could not be generated: {exc}", "error")
         member_map = {str(member["_id"]): member for member in members}
+        current_member_id = (
+            (db.users.find_one({"linked_account_id": current_account_id()}) or {}).get("_id")
+            if not auth_bypass()
+            else None
+        )
+        rsvp = rsvp_summary(plan, members)
+        conflicts = (
+            get_user_plan_conflicts(plan, current_member_id)
+            if current_member_id and has_confirmed_schedule(plan)
+            else []
+        )
         return render_template(
             "plan_detail.html",
             plan=plan,
             group=group,
             member_map=member_map,
-            rsvp=rsvp_summary(plan, members),
+            rsvp=rsvp,
+            current_rsvp_row=next(
+                (row for row in rsvp["rows"] if row["member"]["_id"] == current_member_id), None
+            ),
             eligible_invitees=eligible_invitees,
             event_time_options=event_time_options(plan),
             rsvp_time_defaults=rsvp_time_defaults(plan),
-            can_manage_group=group_is_owner(group),
-            current_member_id=(
-                (db.users.find_one({"linked_account_id": current_account_id()}) or {}).get("_id")
-                if not auth_bypass()
-                else None
-            ),
+            can_manage_group=has_group_permission(group, "manage_plans"),
+            can_edit_member_rsvp=has_group_permission(group, "edit_member_rsvp"),
+            current_member_id=current_member_id,
+            conflicts=conflicts,
         )
 
     @app.route("/plans/<plan_id>/edit", methods=["GET", "POST"])
@@ -1879,11 +2193,14 @@ def create_app(database_override=None):
         member = db.users.find_one({"_id": member_id})
         if not member:
             abort(404)
-        if not group_is_owner(group) and member.get("linked_account_id") != current_account_id():
+        if (
+            not has_group_permission(group, "edit_member_rsvp")
+            and member.get("linked_account_id") != current_account_id()
+        ):
             abort(403)
 
         status = request.form.get("status", "").strip()
-        allowed_statuses = {"attending", "not_attending"}
+        allowed_statuses = {"pending", "attending", "not_attending"}
         if status not in allowed_statuses:
             flash("Please choose a valid RSVP response.", "error")
             return redirect(url_for("plan_detail", plan_id=plan["_id"]))
@@ -1937,6 +2254,10 @@ def create_app(database_override=None):
                 response["arrival_time"] = arrival_time
             if leaving_early and departure:
                 response["departure_time"] = departure_time
+        else:
+            # Pending and Not Attending never retain partial-attendance fields.
+            response.pop("arriving_late", None)
+            response.pop("leaving_early", None)
 
         db.plans.update_one(
             {"_id": plan["_id"]},

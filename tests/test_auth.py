@@ -53,6 +53,72 @@ def test_registration_hashes_password_and_starts_empty(auth_app_and_db):
     assert database.availability.count_documents({}) == 0
 
 
+def test_account_links_to_dedicated_availability_page(auth_app_and_db):
+    app, database = auth_app_and_db
+    client = app.test_client()
+    register(client, username="availability-user")
+    account = database.accounts.find_one({"normalized_username": "availability-user"})
+    database.users.insert_one({
+        "display_name": "Availability User",
+        "normalized_name": "availability user",
+        "linked_account_id": account["_id"],
+        "account_id": account["_id"],
+    })
+
+    page = client.get("/account").get_data(as_text=True)
+    assert "data-account-availability" not in page
+    assert "Current Availability" not in page
+    assert 'href="/account/availability"' in page
+
+    availability = client.get("/account/availability")
+    assert availability.status_code == 302
+    assert "/users/" in availability.headers["Location"]
+
+
+def test_availability_edit_authorization_distinguishes_owner_admin_and_member(auth_app_and_db):
+    app, database = auth_app_and_db
+    client = app.test_client()
+    register(client, username="owner-user")
+    owner = database.accounts.find_one({"normalized_username": "owner-user"})
+    client.post("/groups/create", data={"name": "Permission Group", "description": ""})
+    group = database.groups.find_one({"name": "Permission Group"})
+    owner_member = database.users.find_one({"linked_account_id": owner["_id"]})
+
+    client.post("/logout")
+    register(client, username="member-user")
+    member_account = database.accounts.find_one({"normalized_username": "member-user"})
+    member_id = database.users.insert_one({
+        "display_name": "Member User",
+        "normalized_name": "member user",
+        "account_id": member_account["_id"],
+        "linked_account_id": member_account["_id"],
+    }).inserted_id
+    member = database.users.find_one({"_id": member_id})
+    database.groups.update_one(
+        {"_id": group["_id"]},
+        {"$addToSet": {"member_ids": member["_id"], "account_ids": member_account["_id"]},
+         "$set": {f"account_roles.{member_account['_id']}": "member"}},
+    )
+
+    assert client.get(f"/users/{owner_member['_id']}/availability").status_code == 403
+    assert client.get(f"/users/{member['_id']}/availability").status_code == 200
+
+    database.groups.update_one(
+        {"_id": group["_id"]},
+        {"$set": {
+            f"account_roles.{member_account['_id']}": "admin",
+            f"admin_permissions.{member_account['_id']}": ["edit_member_availability"],
+        }},
+    )
+    assert client.get(f"/users/{owner_member['_id']}/availability").status_code == 200
+
+    database.groups.update_one(
+        {"_id": group["_id"]},
+        {"$set": {f"admin_permissions.{member_account['_id']}": []}},
+    )
+    assert client.get(f"/users/{owner_member['_id']}/availability").status_code == 403
+
+
 def test_registration_validation_and_duplicate_username(auth_app_and_db):
     app, _database = auth_app_and_db
     client = app.test_client()

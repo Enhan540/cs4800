@@ -3,6 +3,9 @@
 {% macro time_picker(name, value, label) -%}
 <label class="unified-time-input"><span>{{ label }}</span><span class="unified-time-control"><input name="{{ name }}" type="text" value="{{ value|time_input if value else '' }}" placeholder="Optional" inputmode="text" autocomplete="off" aria-label="{{ label }}, optional" data-unified-time></span></label>
 {%- endmacro %}
+{% macro rsvp_form(row) -%}
+<form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form data-arrival-default="{{ rsvp_time_defaults.arrival|time_input if rsvp_time_defaults.arrival else '' }}" data-departure-default="{{ rsvp_time_defaults.departure|time_input if rsvp_time_defaults.departure else '' }}"><input type="hidden" name="member_id" value="{{ row.member._id }}"><label>Response<select name="status" required data-rsvp-status><option value="pending"{% if row.status == 'pending' %} selected{% endif %}>Pending</option><option value="attending"{% if row.status == 'attending' %} selected{% endif %}>Attending</option><option value="not_attending"{% if row.status == 'not_attending' %} selected{% endif %}>Not Attending</option></select></label><div class="rsvp-modifiers" data-rsvp-modifiers><label><input type="checkbox" name="arriving_late"{% if row.arriving_late %} checked{% endif %} data-rsvp-arriving-late> Arriving late</label><label><input type="checkbox" name="leaving_early"{% if row.leaving_early %} checked{% endif %} data-rsvp-leaving-early> Leaving early</label></div><div class="rsvp-details" data-rsvp-details><div class="rsvp-time-field" data-rsvp-arrival-field>{{ time_picker('arrival_time', row.arrival_time, 'Arrival time') }}</div><div class="rsvp-time-field" data-rsvp-departure-field>{{ time_picker('departure_time', row.departure_time, 'Leaving time') }}</div></div><div class="rsvp-action"><button class="button secondary" type="submit">Save RSVP</button></div></form>
+{%- endmacro %}
 {% block content %}
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
 
@@ -38,6 +41,15 @@
     {% elif can_manage_group %}<button class="button secondary" type="button" disabled title="All group members are already invited">+ Invite Members</button>{% endif %}
   </section>
 
+  {% if conflicts %}
+    <section class="conflict-warning card" role="status">
+      <div><p class="eyebrow">⚠ Scheduling conflict{% if conflicts|length != 1 %}s{% endif %}</p><h2>{{ conflicts|length }} overlapping plan{% if conflicts|length != 1 %}s{% endif %}</h2><p class="muted">{% if current_rsvp_row.status == 'pending' %}Your RSVP is still pending for this plan.{% else %}Your attendance overlaps another plan.{% endif %}</p></div>
+      <div class="conflict-list">
+        {% for conflict in conflicts %}<article class="conflict-item"><div><strong>{{ conflict.plan.title }}</strong><span>{{ conflict.plan.scheduled_start|date_short }} · {{ conflict.plan.scheduled_start|datetime_time12 }} – {{ conflict.plan.scheduled_end|datetime_time12 }}</span><small>{% if conflict.interval.status == 'pending' %}Your RSVP is still pending for this plan.{% elif conflict.interval.partial %}You are attending part of this plan.{% else %}You are attending this plan.{% endif %} Overlap: {{ conflict.overlap_start|datetime_time12 }} – {{ conflict.overlap_end|datetime_time12 }}.</small></div><a class="button secondary" href="{{ url_for('plan_detail', plan_id=conflict.plan._id) }}">View plan</a></article>{% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
   <details class="plan-details card">
     <summary>Scheduling Requirements</summary>
     <div class="plan-summary compact-plan-summary">
@@ -51,6 +63,7 @@
 
   <section class="content-section rsvp-section">
     <div class="section-heading"><div><h2>Attendance</h2><p class="muted small section-subtitle">Each invited member can update their RSVP.</p></div></div>
+    {% if current_rsvp_row %}<article class="card own-rsvp-card"><div><p class="eyebrow">Your RSVP</p><h3>{{ current_rsvp_row.member.display_name }}</h3><p class="muted">Your response is visible to this group.</p></div>{{ rsvp_form(current_rsvp_row) }}</article>{% endif %}
     {% if rsvp.rows %}
       <div class="rsvp-list">
         {% for row in rsvp.rows %}
@@ -60,21 +73,12 @@
               <span class="rsvp-status status-{{ row.status }} {% if row.arriving_late or row.leaving_early %}status-partial{% endif %}">
                 <span class="rsvp-status-dot" aria-hidden="true"></span>
                 {% if row.status == 'attending' %}Attending
-                {% elif row.status == 'not_attending' %}Not attending
-                {% else %}Awaiting response{% endif %}
+                {% elif row.status == 'not_attending' %}Not Attending
+                {% else %}Pending{% endif %}
               </span>
               {% if row.status == 'attending' and row.arriving_late and row.leaving_early %}<span class="rsvp-detail">{% if row.arrival_time and row.departure_time %}{{ row.arrival_time|time12 }} – {{ row.departure_time|time12 }}{% elif row.arrival_time %}Arriving at {{ row.arrival_time|time12 }} · Leaving early{% elif row.departure_time %}Arriving late · Leaving at {{ row.departure_time|time12 }}{% else %}Arriving late · Leaving early{% endif %}</span>{% elif row.status == 'attending' and row.arriving_late %}<span class="rsvp-detail">{% if row.arrival_time %}Arriving at {{ row.arrival_time|time12 }}{% else %}Arriving late{% endif %}</span>{% elif row.status == 'attending' and row.leaving_early %}<span class="rsvp-detail">{% if row.departure_time %}Leaving at {{ row.departure_time|time12 }}{% else %}Leaving early{% endif %}</span>{% endif %}
             </div>
-            {% if can_manage_group or row.member._id == current_member_id %}<form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form data-arrival-default="{{ rsvp_time_defaults.arrival|time_input if rsvp_time_defaults.arrival else '' }}" data-departure-default="{{ rsvp_time_defaults.departure|time_input if rsvp_time_defaults.departure else '' }}">
-              <input type="hidden" name="member_id" value="{{ row.member._id }}">
-              <label>Response<select name="status" required data-rsvp-status>
-                <option value="attending" {% if row.status == 'attending' %}selected{% endif %}>Attending</option>
-                <option value="not_attending" {% if row.status == 'not_attending' %}selected{% endif %}>Not Attending</option>
-              </select></label>
-              <div class="rsvp-modifiers" data-rsvp-modifiers><label><input type="checkbox" name="arriving_late" {% if row.arriving_late %}checked{% endif %} data-rsvp-arriving-late> Arriving late</label><label><input type="checkbox" name="leaving_early" {% if row.leaving_early %}checked{% endif %} data-rsvp-leaving-early> Leaving early</label></div>
-              <div class="rsvp-details" data-rsvp-details><div class="rsvp-time-field" data-rsvp-arrival-field>{{ time_picker('arrival_time', row.arrival_time, 'Arrival time') }}</div><div class="rsvp-time-field" data-rsvp-departure-field>{{ time_picker('departure_time', row.departure_time, 'Leaving time') }}</div></div>
-              <div class="rsvp-action"><button class="button secondary" type="submit">Save RSVP</button></div>
-            </form>{% endif %}
+            {% if can_edit_member_rsvp and row.member._id != current_member_id %}<button class="button secondary rsvp-edit-button" type="button" data-dialog-open="rsvp-edit-{{ row.member._id }}">Edit</button><dialog class="app-dialog rsvp-edit-dialog" id="rsvp-edit-{{ row.member._id }}"><div class="dialog-heading"><div><p class="eyebrow">Attendance</p><h2>Edit {{ row.member.display_name }}'s RSVP</h2></div><button class="icon-button" type="button" data-dialog-close aria-label="Close">×</button></div>{{ rsvp_form(row) }}<div class="dialog-actions"><button class="button secondary" type="button" data-dialog-close>Cancel</button></div></dialog>{% endif %}
           </article>
         {% endfor %}
       </div>

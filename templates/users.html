@@ -1,29 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Members | Group Planner{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ url_for('group_detail', group_id=origin_group._id) if origin_group else url_for('dashboard') }}">← Back to {{ origin_group.name if origin_group else 'Dashboard' }}</a>
-<section class="page-heading with-back-link"><div><p class="eyebrow">People</p><h1>{% if origin_group %}Create a member for {{ origin_group.name }}{% else %}Members{% endif %}</h1><p class="muted">Members are global and can be reused across multiple groups.{% if origin_group %} This member will be added to {{ origin_group.name }} automatically.{% endif %}</p></div></section>
-<div class="two-column members-layout">
-  <section class="card form-card">
-    <div class="section-heading"><div><h2>Add a member</h2><p class="muted small section-subtitle">Create a reusable member profile.</p></div></div>
-    <form method="post" action="{{ url_for('users') }}">
-      {% if origin_group %}<input type="hidden" name="group_id" value="{{ origin_group._id }}">{% endif %}
-      <label for="display_name">Display name<input id="display_name" name="display_name" maxlength="100" required></label>
-      <label for="email">Email <span class="optional">optional</span><input id="email" name="email" type="email" maxlength="200"></label>
-      <button class="button" type="submit">{% if origin_group %}Create and add to group{% else %}Add member{% endif %}</button>
-    </form>
-  </section>
-  <section class="card member-directory">
-    <div class="section-heading"><div><h2>Current members</h2><p class="muted small section-subtitle">Open a member to manage weekly availability.</p></div><span class="count">{{ users|length }}</span></div>
-    {% if users %}
-      <div class="item-list">
-        {% for user in users %}
-          <a class="list-item" href="{{ url_for('member_availability', user_id=user._id, return_to=url_for('group_detail', group_id=origin_group._id) if origin_group else url_for('users')) }}">
-            <span><strong>{{ user.display_name }}</strong><small>{{ user.email or 'No email added' }}</small></span><span>Availability →</span>
-          </a>
-        {% endfor %}
-      </div>
-    {% else %}<div class="empty-state compact"><p class="muted">No members yet.</p></div>{% endif %}
-  </section>
-</div>
+<a class="back-link" href="{{ url_for('dashboard') }}">← Back to Dashboard</a>
+<section class="page-heading with-back-link"><p class="eyebrow">People</p><h1>Members</h1><p class="muted">Account-based group invitations are managed from each group.</p></section>
+<section class="card member-directory"><div class="section-heading"><div><h2>Your member profiles</h2><p class="muted small section-subtitle">Legacy profiles remain available for existing availability data.</p></div><span class="count">{{ users|length }}</span></div>{% if users %}<div class="item-list">{% for user in users %}<a class="list-item" href="{{ url_for('member_availability', user_id=user._id, return_to=url_for('users')) }}"><span><strong>{{ user.display_name }}</strong><small>{{ user.email or 'No email added' }}</small></span><span>Availability →</span></a>{% endfor %}</div>{% else %}<div class="empty-state compact"><p class="muted">No member profiles yet.</p></div>{% endif %}</section>
 {% endblock %}

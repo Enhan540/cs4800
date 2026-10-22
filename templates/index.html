@@ -3,7 +3,7 @@
 {% block content %}
 <section class="hero dashboard-hero">
   <div><p class="eyebrow">Group Planner dashboard</p><h1>Welcome, {{ current_user.username }}</h1><p>Create a group, save each member's weekly availability, and turn the overlap into a scheduled plan.</p></div>
-  <div class="button-row"><a class="button" href="{{ url_for('create_group') }}">+ Create Group</a><a class="button secondary" href="{{ url_for('users') }}">Add Members</a></div>
+  <div class="button-row"><a class="button" href="{{ url_for('create_group') }}">+ Create Group</a></div>
 </section>
 
 <section class="stats-grid" aria-label="Application summary">
@@ -12,9 +12,20 @@
   <article class="stat"><strong>{{ stats.plans }}</strong><span>Plans</span></article>
 </section>
 
+{% if pending_invitations %}
+<section class="content-section dashboard-section">
+  <div class="section-heading"><div><h2>Group Invitations <span class="count">{{ pending_invitations|length }}</span></h2><p class="muted small section-subtitle">Groups waiting for your response.</p></div></div>
+  <div class="card-grid invitation-grid">
+    {% for invitation in pending_invitations %}
+      <article class="card invitation-card"><h3>{{ invitation.group.name }}</h3><p class="muted">Invited by {{ invitation.inviter.username if invitation.inviter else 'a group member' }}</p><p class="muted small">{{ invitation.group.member_ids|length }} members</p><div class="button-row"><form method="post" action="{{ url_for('decline_group_invitation', invitation_id=invitation._id) }}"><button class="button secondary" type="submit">Decline</button></form><form method="post" action="{{ url_for('accept_group_invitation', invitation_id=invitation._id) }}"><button class="button" type="submit">Join Group</button></form></div></article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section class="content-section dashboard-section">
   <div class="section-heading"><div><h2>Upcoming Plans</h2><p class="muted small section-subtitle">Confirmed upcoming events across your groups.</p></div></div>
-  {% if upcoming_plans %}<div class="plan-card-grid">{% for plan in upcoming_plans %}<a class="card lifecycle-card scheduled-plan-card clickable-card" href="{{ url_for('plan_detail', plan_id=plan._id) }}"><span class="lifecycle-label scheduled-label">{{ plan.scheduled_start|date_short }}</span><h3>{{ plan.title }}</h3><p class="plan-card-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }}</p><p class="group-context">{{ plan.group_name }}</p><p class="muted small">{{ plan.rsvp_summary.counts.overall_attending }} attending · {{ plan.rsvp_summary.counts.pending }} pending</p><span class="card-arrow" aria-hidden="true">→</span></a>{% endfor %}</div>{% else %}<div class="card empty-state compact"><h3>No upcoming plans</h3><p class="muted">Scheduled plans will appear here.</p></div>{% endif %}
+  {% if upcoming_plans %}<div class="plan-card-grid plan-carousel" aria-label="Upcoming plans">{% for plan in upcoming_plans %}<article class="card lifecycle-card scheduled-plan-card clickable-card" tabindex="0" role="link" data-card-href="{{ url_for('plan_detail', plan_id=plan._id) }}"><span class="lifecycle-label scheduled-label">{{ plan.scheduled_start|date_short }}</span><h3>{{ plan.title }}</h3><p class="plan-card-time">{{ plan.scheduled_start|datetime_time12 }} – {{ plan.scheduled_end|datetime_time12 }}</p><p class="group-context">{{ plan.group_name }}</p><p class="muted small">{{ plan.rsvp_summary.counts.overall_attending }} attending · {{ plan.rsvp_summary.counts.pending }} pending</p><span class="card-arrow" aria-hidden="true">→</span></article>{% endfor %}</div>{% else %}<div class="card empty-state compact"><h3>No upcoming plans</h3><p class="muted">Scheduled plans will appear here.</p></div>{% endif %}
 </section>
 
 <section class="content-section dashboard-section">
