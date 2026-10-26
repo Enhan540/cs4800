@@ -48,6 +48,15 @@ def make_plan(database, group_id, **overrides):
     return database.plans.insert_one(document).inserted_id
 
 
+def test_shared_layout_includes_vercel_web_analytics(app_and_db):
+    app, _database = app_and_db
+    response = app.test_client().get("/")
+
+    assert response.status_code == 200
+    assert b"window.va = window.va || function" in response.data
+    assert b'<script defer src="/_vercel/insights/script.js"></script>' in response.data
+
+
 def matching_time(member_ids, *, exact=True, duration=120):
     return {
         "date": "2026-10-23",
@@ -331,8 +340,8 @@ def test_group_availability_matrix_renders_members_windows_and_empty_cells(app_a
     assert "5:00 PM–9:00 PM" in page
     assert "9:00 AM–12:00 PM" in page
     assert "4:00 PM–8:00 PM" in page
-    assert "—" in page
-    assert page.count("Edit availability") >= 3
+    assert "member-selection-panel" in page
+    assert "data-member-select" in page
 
 
 def test_group_availability_maps_week_dates_and_hides_calendar_event_details(app_and_db):
@@ -359,9 +368,9 @@ def test_group_availability_maps_week_dates_and_hides_calendar_event_details(app
     ).get_data(as_text=True)
 
     assert "Fri" in page and "30" in page
-    assert "availability-effective" in page
-    assert "availability-conflict" in page
-    assert "Calendar conflict" in page
+    assert "member-overlay-available" in page
+    assert "member-overlay-conflict" in page
+    assert "Unavailable" in page
     assert "Private event that must not be exposed" not in page
     assert "week_start=2026-11-02" in page
     assert "week_start=2026-10-19" in page
@@ -406,6 +415,10 @@ def test_group_page_order_dynamic_heatmap_start_and_pacific_ical_count(app_and_d
     assert 'data-start-minutes="540"' in page
     assert 'data-available-count="1"' in page
     assert 'data-start-minutes="960" data-available-count="2"' not in page
+    assert 'data-group-availability' in page
+    assert page.count('data-member-select=') == 2
+    assert page.count('data-member-overlay=') >= 14
+    assert 'group-availability-member-details' not in page
 
 
 def test_group_heatmap_start_clamps_at_midnight(app_and_db):

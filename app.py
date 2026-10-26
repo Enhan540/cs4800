@@ -1631,6 +1631,7 @@ def create_app(database_override=None):
                         "start_minutes": int((segment["start"] - datetime.combine(current, datetime.min.time())).total_seconds() // 60),
                         "duration_minutes": int((segment["end"] - segment["start"]).total_seconds() // 60),
                         "conflicted": segment["conflicted"],
+                        "conflict_sources": segment.get("conflict_sources", []),
                     }
                     for segment in segments
                 ]
