@@ -410,7 +410,7 @@ def test_group_page_order_dynamic_heatmap_start_and_pacific_ical_count(app_and_d
     assert page.index("<h2>Upcoming Plans") < page.index("<h2>Planning")
     assert page.index("<h2>Planning") < page.index("<h2>Group Availability")
     assert page.index("<h2>Group Availability") < page.index("<h2>Members")
-    assert 'data-resolution-minutes="30"' in page
+    assert 'data-resolution-minutes="60"' in page
     assert 'data-start-minutes="420"' in page
     assert 'data-start-minutes="540"' in page
     assert 'data-available-count="1"' in page

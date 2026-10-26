@@ -3,8 +3,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const memberButtons = Array.from(groupView.querySelectorAll("[data-member-select]"));
     const overlays = Array.from(groupView.querySelectorAll("[data-member-overlay]"));
     const clearButton = groupView.querySelector("[data-member-clear]");
-    const viewing = groupView.querySelector("[data-member-viewing]");
-    const viewingName = groupView.querySelector("[data-member-viewing-name]");
     const setSelectedMember = (memberId) => {
       const selected = memberId || "";
       groupView.dataset.selectedMember = selected;
@@ -17,10 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
         overlay.hidden = !isSelected;
         overlay.setAttribute("aria-hidden", String(!isSelected));
       });
-      const selectedButton = memberButtons.find((button) => button.dataset.memberSelect === selected);
       if (clearButton) clearButton.hidden = !selected;
-      if (viewing) viewing.hidden = !selected;
-      if (viewingName) viewingName.textContent = selectedButton?.dataset.memberName || "";
     };
     memberButtons.forEach((button) => button.addEventListener("click", () => {
       const next = button.dataset.memberSelect === groupView.dataset.selectedMember ? "" : button.dataset.memberSelect;
