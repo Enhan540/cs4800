@@ -45,7 +45,9 @@
   color: var(--text);
   background: var(--surface);
 }
+.visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { min-width: 320px; scroll-behavior: smooth; }
 body { margin: 0; min-height: 100vh; background: var(--surface); color: var(--text); font-family: var(--font-body); font-size: 1rem; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 button, input, select, textarea { font: inherit; }
@@ -246,9 +248,9 @@ tr:last-child td { border-bottom: 0; }
 .availability-edit-form { display: flex; align-items: end; gap: .8rem; flex-wrap: wrap; }
 .compact-time-picker-grid { flex: 1 1 460px; max-width: none; }
 .weekly-overview { margin-top: 2.5rem; }
-.weekly-calendar { position: relative; min-width: 650px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface); padding: 1rem 1rem 1rem 3.8rem; }
-.weekly-overview { overflow-x: auto; }
-.calendar-time-axis { position: absolute; top: 2.75rem; bottom: 1rem; left: .35rem; display: flex; flex-direction: column; justify-content: space-between; color: var(--text-muted); font-size: .7rem; }.calendar-day-columns { display: grid; grid-template-columns: repeat(7, minmax(70px, 1fr)); gap: .35rem; }.calendar-day > strong { display: block; padding-bottom: .5rem; color: var(--text-secondary); font-family: var(--font-heading); font-size: .75rem; text-align: center; }.calendar-day-track { position: relative; height: 310px; border-radius: var(--radius-sm); background: repeating-linear-gradient(180deg, var(--surface-low) 0, var(--surface-low) calc(25% - 1px), var(--border) calc(25% - 1px), var(--border) 25%); }.calendar-window { position: absolute; right: .18rem; left: .18rem; min-height: 2px; border: 1px solid #34d399; border-radius: .375rem; background: #86efac; box-shadow: 0 2px 5px rgba(0, 108, 73, .12); }
+.weekly-calendar { position: relative; min-width: 650px; overflow-x: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface); padding: 1rem 1rem 1rem 3.8rem; }
+.weekly-overview { overflow: hidden; }
+.calendar-time-axis { position: absolute; top: 2.75rem; bottom: 1rem; left: .35rem; display: flex; flex-direction: column; justify-content: space-between; color: var(--text-muted); font-size: .7rem; }.calendar-day-columns { display: grid; grid-template-columns: repeat(7, minmax(94px, 1fr)); gap: .5rem; min-width: 760px; }.calendar-day { border-radius: var(--radius-sm); padding: .2rem; cursor: pointer; transition: background-color .15s ease, box-shadow .15s ease; }.calendar-day:hover { background: rgba(79, 70, 229, .055); }.calendar-day:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(79, 70, 229, .2); }.calendar-day-header { display: block; width: 100%; padding: 0 .2rem .5rem; color: var(--text-secondary); font-family: var(--font-heading); font-size: .75rem; font-weight: 700; text-align: center; }.calendar-day-track { position: relative; height: 310px; border-radius: var(--radius-sm); background: repeating-linear-gradient(180deg, var(--surface-low) 0, var(--surface-low) calc(25% - 1px), var(--border) calc(25% - 1px), var(--border) 25%); }.calendar-window { position: absolute; right: .18rem; left: .18rem; min-height: 2px; border: 1px solid #34d399; border-radius: .375rem; background: #86efac; box-shadow: 0 2px 5px rgba(0, 108, 73, .12); }
 .current-availability { border-top: 1px solid var(--border); padding-top: clamp(1rem, 3vw, 1.5rem); }
 .current-availability [data-availability-readonly] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
 .availability-summary-day, .availability-edit-day { border-bottom: 1px solid var(--border-subtle); padding: .8rem 0; }
@@ -313,15 +315,81 @@ tr:last-child td { border-bottom: 0; }
 .matrix-member a { margin-top: .25rem; font-size: .72rem; text-transform: none; letter-spacing: 0; }
 .availability-matrix td { background: #fbfdff; }
 .availability-window { display: block; margin-bottom: .38rem; border: 1px solid #86efac; border-radius: var(--radius-sm); background: var(--success-soft); color: var(--success); padding: .36rem .45rem; font-size: .75rem; font-weight: 700; text-align: center; white-space: nowrap; }
+.availability-window.availability-effective { border-color: #86efac; background: var(--success-soft); color: var(--success); }
+.availability-window.availability-conflict { border-color: #cbd5e1; background: repeating-linear-gradient(135deg, #e2e8f0, #e2e8f0 5px, #cbd5e1 5px, #cbd5e1 10px); color: #475569; }
+.week-navigation { display: flex; align-items: center; gap: .65rem; }
+.week-navigation strong { min-width: 12rem; text-align: center; }
+.availability-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin: .25rem 0 1rem; color: var(--text-muted); font-size: .8rem; }
+.availability-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+.legend-swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; }
+.legend-swatch.normally-available { background: #86efac; border: 1px solid #34d399; }
+.legend-swatch.unavailable-conflict { background: #cbd5e1; border: 1px solid #94a3b8; }
+.availability-matrix thead small { display: block; margin-top: .1rem; color: var(--text-muted); font-size: .72rem; font-weight: 500; }
+.availability-heatmap-wrapper { overflow-x: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface); }
+.availability-heatmap { position: relative; display: grid; min-width: 760px; grid-template-columns: 4.5rem repeat(7, minmax(5.5rem, 1fr)); gap: 1px; background: var(--border-subtle); }
+.availability-heatmap > * { background: var(--surface); }
+.heatmap-corner, .heatmap-day-header { position: sticky; top: 0; z-index: 1; background: var(--surface-low) !important; font-weight: 700; text-align: center; }
+.heatmap-corner, .heatmap-day-header { min-height: 2.5rem; padding: .4rem; }
+.heatmap-day-header small { display: block; color: var(--text-muted); font-size: .72rem; font-weight: 500; }
+.heatmap-time, .heatmap-slot { min-height: .95rem; padding: 0 .25rem; }
+.heatmap-time { color: var(--text-muted); font-size: .7rem; line-height: .95rem; text-align: right; }
+.heatmap-time-minor { background: var(--surface-low); }
+.heatmap-slot { display: grid; place-items: center; border-radius: .14rem; color: var(--text-secondary); font-size: .7rem; font-weight: 700; transition: filter .12s ease, box-shadow .12s ease; }
+.heatmap-none { background: var(--surface-low) !important; color: var(--text-muted); }
+.heatmap-low { background: #d9f5e6 !important; color: #246b4b; }
+.heatmap-medium { background: #86efac !important; color: #14532d; }
+.heatmap-high { background: #34d399 !important; color: #064e3b; }
+.heatmap-slot:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -2px; }
+.heatmap-slot:hover { filter: saturate(1.12) brightness(.98); box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .12); }
+.heatmap-axis { position: relative; min-height: 36rem; margin-top: 2.5rem; background: var(--surface-low) !important; }
+.heatmap-axis span { position: absolute; right: .35rem; transform: translateY(-50%); color: var(--text-muted); font-size: .7rem; white-space: nowrap; }
+.heatmap-day-column { display: grid; min-width: 0; grid-template-rows: auto 1fr; background: var(--surface) !important; }
+.heatmap-day-column .heatmap-day-header { position: static; min-height: 2.5rem; }
+.heatmap-track { position: relative; min-height: 36rem; background: repeating-linear-gradient(to bottom, var(--surface-low) 0, var(--surface-low) calc(var(--half-hour-height) - 1px), var(--border) calc(var(--half-hour-height) - 1px), var(--border) var(--half-hour-height)); overflow: hidden; }
+.heatmap-block { position: absolute; right: .18rem; left: .18rem; z-index: 1; display: flex; min-height: 2px; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; border: 1px solid transparent; border-radius: .35rem; padding: .15rem .2rem; color: #064e3b; font-size: .68rem; font-weight: 700; line-height: 1.15; text-align: center; cursor: pointer; transition: filter .12s ease, box-shadow .12s ease; }
+.heatmap-block span, .heatmap-block small { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
+.heatmap-block small { font-size: .7rem; }
+.heatmap-block:hover, .heatmap-block:focus-visible { filter: saturate(1.12) brightness(.98); box-shadow: 0 0 0 3px rgba(16, 185, 129, .2); outline: none; }
+.best-availability-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; margin-bottom: 1rem; }
+.best-availability-grid > .eyebrow { grid-column: 1 / -1; margin: 0; }
+.best-availability-item { display: grid; gap: .2rem; border: 1px solid #a7f3d0; border-radius: var(--radius-sm); background: var(--success-soft); padding: .7rem .8rem; }
+.best-availability-item span { font-weight: 700; }
+.best-availability-item small { color: var(--text-muted); }
+.group-availability-member-details { margin-top: 1rem; border-top: 1px solid var(--border-subtle); padding-top: .8rem; }
+.group-availability-member-details summary { color: var(--primary); font-weight: 700; cursor: pointer; }
+.group-availability-member-details article { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .75rem; padding: .65rem 0; border-bottom: 1px solid var(--border-subtle); }
+.group-availability-member-details article strong { min-width: 8rem; }
+.group-availability-member-details article a { margin-left: auto; }
+.group-availability-member-details article span { color: var(--text-muted); font-size: .8rem; }
+@media (max-width: 700px) { .best-availability-grid { grid-template-columns: 1fr; } }
 .availability-window-block { position: absolute; right: .18rem; left: .18rem; z-index: 1; min-height: 2px; margin: 0; padding: 0; cursor: pointer; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
 .availability-window-block:hover, .availability-window-block:focus-visible { border-color: #059669; background: #a7f3d0; box-shadow: 0 0 0 3px rgba(16, 185, 129, .18); outline: none; }
-.availability-window-dialog { position: relative; width: min(36rem, calc(100% - 2rem)); min-height: 30rem; max-height: none; overflow: visible; }
+.availability-window-label { display: block; overflow: hidden; padding: .1rem .2rem; color: #064e3b; font-size: clamp(.52rem, .75vw, .7rem); font-weight: 700; line-height: 1.15; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.availability-window-dialog { position: fixed; width: min(36rem, calc(100% - 2rem)); min-height: 30rem; max-height: min(42rem, calc(100vh - 2rem)); overflow: visible; }
 .availability-window-dialog form { display: grid; min-height: 23rem; align-content: space-between; gap: 1rem; }
 .availability-window-dialog form[data-availability-window-form] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .availability-window-dialog form[data-availability-window-form] .dialog-actions,
 .availability-window-dialog form[data-availability-window-form] .time-picker-popover { grid-column: 1 / -1; }
 .availability-window-dialog .dialog-actions { justify-content: flex-end; margin-top: 0; }
 .availability-window-dialog .time-picker-popover { z-index: 30; margin-top: 0; box-shadow: var(--shadow-overlay); }
+.day-availability-dialog { position: fixed; inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(34rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: visible; margin: 0; }
+.day-availability-content { min-height: 0; max-height: calc(100vh - 10rem); overflow-y: auto; overscroll-behavior: contain; padding: .1rem .15rem; }
+.day-availability-dialog [data-day-readonly] { display: grid; gap: .75rem; min-width: 18rem; }
+.day-window-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .25rem .75rem; width: 100%; margin: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-low); color: var(--text); padding: .8rem 2.4rem .8rem .9rem; font: inherit; text-align: left; }
+button.day-window-card { cursor: pointer; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+button.day-window-card:hover, button.day-window-card:focus-visible { border-color: var(--primary); background: var(--primary-softer); box-shadow: 0 0 0 3px var(--focus-ring); outline: none; }
+.day-window-time { min-width: 0; font-weight: 700; }
+.day-window-edit-icon { color: var(--primary); font-size: 1.1rem; font-weight: 800; }
+.day-window-unsaved { grid-column: 1 / -1; color: var(--text-muted); font-size: .75rem; font-weight: 500; }
+.day-window-delete { position: absolute; top: 50%; right: .65rem; display: grid; width: 1.35rem; height: 1.35rem; place-items: center; transform: translateY(-50%); border-radius: 50%; color: var(--text-muted); cursor: pointer; font-size: 1.1rem; line-height: 1; }
+.day-window-delete:hover, .day-window-delete:focus-visible { background: #fee2e2; color: #b91c1c; outline: none; }
+.day-window-card-active { position: relative; align-items: stretch; background: var(--surface-raised); transition: margin-bottom .15s ease; }
+.day-window-card-active .day-window-delete { top: .65rem; right: .65rem; left: auto; transform: none; color: #b45353; background: #fef2f2; font-size: .95rem; }
+.day-window-card-active .day-window-delete:hover, .day-window-card-active .day-window-delete:focus-visible { background: #fee2e2; color: #991b1b; }
+.day-window-card-active.time-picker-open { margin-bottom: 15rem; }
+.day-window-fields { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.day-availability-actions { justify-content: flex-end; margin-top: .9rem; }
+.day-availability-dialog .time-picker-popover { z-index: 30; margin-top: 0; box-shadow: var(--shadow-overlay); }
 .availability-window:last-child { margin-bottom: 0; }
 .no-availability { display: block; color: var(--text-muted); padding: .36rem; text-align: center; }
 .plan-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
@@ -423,7 +491,7 @@ tr:last-child td { border-bottom: 0; }
 .rsvp-form { display: flex; flex-direction: column; align-items: stretch; gap: .75rem; }.rsvp-form > label { max-width: 260px; margin: 0; }.rsvp-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; min-height: 5.5rem; align-items: start; }.rsvp-action { border-top: 1px solid var(--border); padding-top: .75rem; }.rsvp-action .button { min-width: 8rem; }
 .rsvp-form label { margin: 0; }
 .rsvp-edit-button { justify-self: end; }
-.app-dialog { width: min(34rem, calc(100% - 2rem)); max-height: min(42rem, calc(100vh - 2rem)); overflow-y: auto; border: 0; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-overlay); color: var(--text); padding: 1.25rem; }
+.app-dialog { position: fixed; top: 50%; left: 50%; width: min(34rem, calc(100% - 2rem)); max-height: min(42rem, calc(100vh - 2rem)); transform: translate(-50%, -50%); margin: 0; overflow-y: auto; border: 0; border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-overlay); color: var(--text); padding: 1.25rem; }
 .app-dialog::backdrop { background: rgba(15, 23, 42, .42); backdrop-filter: blur(2px); }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
 .dialog-heading h2 { margin: 0; }
@@ -474,6 +542,8 @@ tr:last-child td { border-bottom: 0; }
   .availability-window-dialog form[data-availability-window-form] .dialog-actions,
   .availability-window-dialog form[data-availability-window-form] .time-picker-popover { grid-column: 1; }
   .availability-window-dialog { width: calc(100% - 2rem); min-height: 31rem; }
+  .day-window-fields { grid-template-columns: 1fr; gap: .65rem; }
+  .day-availability-dialog { width: calc(100% - 2rem); }
   .availability-row { align-items: stretch; flex-direction: column; }
   .current-availability [data-availability-readonly] { grid-template-columns: 1fr; }
   .time-picker-grid { grid-template-columns: 1fr; }

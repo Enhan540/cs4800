@@ -6,8 +6,9 @@ import re
 import secrets
 import base64
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from authlib.integrations.flask_client import OAuth
 from bson import ObjectId
@@ -22,6 +23,10 @@ from cryptography.fernet import Fernet, InvalidToken
 import requests
 
 from services.calendar_service import fetch_calendar_url, normalized_interval, parse_ical_busy_intervals
+from services.availability_service import (
+    availability_segments_for_date,
+    group_availability_blocks,
+)
 from services.conflict_service import effective_plan_interval, intervals_overlap
 from services.scheduling_service import DAYS, find_matching_times, parse_date, parse_time
 
@@ -59,6 +64,11 @@ def object_id(value):
 
 def create_app(database_override=None):
     app = Flask(__name__)
+    timezone_name = os.getenv("APP_TIMEZONE", "America/Los_Angeles")
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise RuntimeError("APP_TIMEZONE must be a valid IANA timezone") from exc
     configured_secret = os.getenv("SECRET_KEY") or os.getenv("FLASK_SECRET_KEY")
     if os.getenv("VERCEL") and not configured_secret:
         raise RuntimeError("SECRET_KEY must be configured in Vercel")
@@ -72,6 +82,7 @@ def create_app(database_override=None):
         GOOGLE_CLIENT_SECRET=os.getenv("GOOGLE_CLIENT_SECRET", ""),
         GOOGLE_REDIRECT_URI=os.getenv("GOOGLE_REDIRECT_URI", ""),
         GOOGLE_CALENDAR_REDIRECT_URI=os.getenv("GOOGLE_CALENDAR_REDIRECT_URI", ""),
+        APP_TIMEZONE=timezone_name,
     )
 
     mongo_uri = os.getenv("MONGO_URI")
@@ -162,6 +173,9 @@ def create_app(database_override=None):
             flash("The database is not configured or is currently unavailable.", "error")
             abort(503)
         return database
+
+    def wants_json_response():
+        return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
 
     def auth_bypass():
         return bool(app.config.get("LOGIN_DISABLED"))
@@ -389,6 +403,30 @@ def create_app(database_override=None):
 
         return validate_availability_values(day, start_time, end_time)
 
+    def calendar_busy_by_member(members):
+        """Return cached busy intervals strictly scoped to each member account."""
+        db = require_database()
+        account_by_member = {
+            str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
+            for member in members
+        }
+        account_ids = [account_id for account_id in account_by_member.values() if account_id]
+        busy_by_account = {}
+        if account_ids:
+            for connection in db.calendar_connections.find(
+                {"account_id": {"$in": account_ids}, "sync_status": "connected"},
+                {"account_id": 1, "busy_intervals": 1},
+            ):
+                busy_by_account.setdefault(connection["account_id"], []).extend(
+                    connection.get("busy_intervals", [])
+                )
+        # A member without a linked account is never assigned another account's
+        # cache, even if other members in the same group have calendars.
+        return {
+            member_id: list(busy_by_account.get(account_id, [])) if account_id else []
+            for member_id, account_id in account_by_member.items()
+        }
+
     def availability_return_context():
         """Return only to known in-app parents, never to an external URL."""
         requested = request.values.get("return_to", "").strip()
@@ -483,25 +521,14 @@ def create_app(database_override=None):
             require_database().availability.find({"user_id": {"$in": member_ids}})
         )
         member_documents = list(
-            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1})
+            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1, "account_id": 1})
         )
         account_by_member = {
-            str(member["_id"]): member.get("linked_account_id") for member in member_documents
+            str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
+            for member in member_documents
         }
+        busy_intervals_by_member = calendar_busy_by_member(member_documents)
         account_ids = [account_id for account_id in account_by_member.values() if account_id]
-        busy_by_account = {}
-        for connection in require_database().calendar_connections.find(
-                {"account_id": {"$in": account_ids}, "sync_status": "connected"},
-                {"account_id": 1, "busy_intervals": 1},
-            ):
-            busy_by_account.setdefault(connection["account_id"], []).extend(
-                connection.get("busy_intervals", [])
-            )
-        busy_intervals_by_member = {
-            member_id: busy_by_account.get(account_id, [])
-            for member_id, account_id in account_by_member.items()
-            if account_id in busy_by_account
-        }
         # Treat existing RSVP-aware Group Planner events like calendar busy time.
         # Pending events are included conservatively; Not Attending is excluded.
         if account_ids:
@@ -559,6 +586,7 @@ def create_app(database_override=None):
             minimum_attendance=values["minimum_attendance"],
             max_results=10,
             busy_intervals_by_member=busy_intervals_by_member,
+            timezone_name=app.config["APP_TIMEZONE"],
         )
 
     def match_metadata(matches):
@@ -901,7 +929,10 @@ def create_app(database_override=None):
         try:
             secret = decrypt_calendar_secret(connection["secret_ciphertext"])
             if connection["provider"] == "ical":
-                intervals = parse_ical_busy_intervals(fetch_calendar_url(secret["url"]))
+                intervals = parse_ical_busy_intervals(
+                    fetch_calendar_url(secret["url"]),
+                    default_timezone=ZoneInfo(app.config["APP_TIMEZONE"]),
+                )
             elif connection["provider"] == "google":
                 token = secret.get("access_token")
                 if not token:
@@ -1213,7 +1244,9 @@ def create_app(database_override=None):
         raw_url = request.form.get("calendar_url", "")
         try:
             payload = fetch_calendar_url(raw_url)
-            intervals = parse_ical_busy_intervals(payload)
+            intervals = parse_ical_busy_intervals(
+                payload, default_timezone=ZoneInfo(app.config["APP_TIMEZONE"])
+            )
         except (ValueError, requests.RequestException):
             flash("That calendar URL could not be safely connected.", "error")
             return redirect(url_for("account"))
@@ -1557,18 +1590,95 @@ def create_app(database_override=None):
                 [("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
         )
-        availability_by_member = {
-            member["_id"]: {day: [] for day in DAYS}
+        try:
+            week_start = date.fromisoformat(request.args.get("week_start", ""))
+        except ValueError:
+            week_start = date.today()
+        week_start -= timedelta(days=week_start.weekday())
+        week_dates = [week_start + timedelta(days=index) for index in range(7)]
+        account_by_member = {
+            str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
             for member in members
         }
-        for entry in entries:
-            member_days = availability_by_member.get(entry.get("user_id"))
-            if member_days is not None and entry.get("day") in member_days:
-                member_days[entry["day"]].append(entry)
-        availability_rows = [
-            {"member": member, "days": availability_by_member[member["_id"]]}
-            for member in members
+        busy_by_member = calendar_busy_by_member(members)
+        plan_conflicts = {str(member["_id"]): [] for member in members}
+        member_group_ids = [
+            item["_id"] for item in db.groups.find(
+                {"member_ids": {"$in": member_ids}}, {"_id": 1}
+            )
         ]
+        for scheduled_plan in db.plans.find({"group_id": {"$in": member_group_ids}, "status": "scheduled"}):
+            scheduled_group = db.groups.find_one({"_id": scheduled_plan["group_id"]}) or {}
+            for member in members:
+                if member["_id"] in plan_member_ids(scheduled_plan, scheduled_group):
+                    interval = effective_plan_interval(scheduled_plan, member["_id"])
+                    if interval:
+                        plan_conflicts[str(member["_id"])].append(interval)
+        availability_rows = []
+        for member in members:
+            member_days = {}
+            for current in week_dates:
+                segments = availability_segments_for_date(
+                    entries, member["_id"], current,
+                    calendar_busy_intervals=busy_by_member[str(member["_id"])],
+                    plan_intervals=plan_conflicts[str(member["_id"])],
+                    timezone_name=app.config["APP_TIMEZONE"],
+                )
+                member_days[current.isoformat()] = [
+                    {
+                        "start_time": segment["start"].strftime("%H:%M"),
+                        "end_time": segment["end"].strftime("%H:%M"),
+                        "start_minutes": int((segment["start"] - datetime.combine(current, datetime.min.time())).total_seconds() // 60),
+                        "duration_minutes": int((segment["end"] - segment["start"]).total_seconds() // 60),
+                        "conflicted": segment["conflicted"],
+                    }
+                    for segment in segments
+                ]
+            availability_rows.append({"member": member, "days": member_days})
+        baseline_starts = []
+        baseline_ends = []
+        member_keys = {str(member["_id"]) for member in members}
+        displayed_day_names = {current.strftime("%A") for current in week_dates}
+        for entry in entries:
+            if str(entry.get("user_id")) not in member_keys or entry.get("day") not in displayed_day_names:
+                continue
+            try:
+                baseline_starts.append(parse_time(entry.get("start_time")))
+                baseline_ends.append(parse_time(entry.get("end_time")))
+            except (TypeError, ValueError):
+                continue
+        earliest_baseline = min(baseline_starts, default=10 * 60)
+        heatmap_start_minutes = max(0, earliest_baseline - 60)
+        heatmap_start_minutes -= heatmap_start_minutes % 30
+        latest_baseline = max(baseline_ends, default=23 * 60)
+        heatmap_end_minutes = min(24 * 60, ((latest_baseline + 60 + 29) // 30) * 30)
+        heatmap_end_minutes = max(heatmap_end_minutes, heatmap_start_minutes + 30)
+        heatmap_days = group_availability_blocks(
+            entries,
+            [member["_id"] for member in members],
+            week_dates,
+            calendar_busy_by_member=busy_by_member,
+            plan_conflicts_by_member=plan_conflicts,
+            start_minute=heatmap_start_minutes,
+            end_minute=heatmap_end_minutes,
+            timezone_name=app.config["APP_TIMEZONE"],
+        )
+        best_availability = []
+        for day in week_dates:
+            for block in next(item for item in heatmap_days if item["date"] == day.isoformat())["blocks"]:
+                best_availability.append({
+                    "date": day,
+                    "start_minutes": block["start_minutes"],
+                    "end_minutes": block["end_minutes"],
+                    "available_count": block["available_count"],
+                    "total_count": block["total_members"],
+                })
+        best_availability.sort(key=lambda item: (
+            -item["available_count"],
+            -(item["end_minutes"] - item["start_minutes"]),
+            item["date"],
+            item["start_minutes"],
+        ))
         plans = list(db.plans.find({"group_id": group["_id"]}))
         scheduled_plans = []
         planning_plans = []
@@ -1588,8 +1698,17 @@ def create_app(database_override=None):
             "group_detail.html",
             group=group,
             members=members,
-            availability_days=DAYS,
+            availability_days=week_dates,
+            week_start=week_start,
+            week_end=week_dates[-1],
+            previous_week=(week_start - timedelta(days=7)).isoformat(),
+            next_week=(week_start + timedelta(days=7)).isoformat(),
             availability_rows=availability_rows,
+            heatmap_days=heatmap_days,
+            has_heatmap_blocks=any(item["blocks"] for item in heatmap_days),
+            best_availability=best_availability[:3],
+            heatmap_start_minutes=heatmap_start_minutes,
+            heatmap_end_minutes=heatmap_end_minutes,
             scheduled_plans=scheduled_plans,
             planning_plans=planning_plans,
             upcoming_plan_count=len(scheduled_plans),
@@ -1829,10 +1948,21 @@ def create_app(database_override=None):
         if request.method == "POST":
             values, error = validate_availability(request.form)
             if error:
+                if wants_json_response():
+                    return jsonify({"error": error}), 400
                 flash(error, "error")
             else:
                 values.update({"user_id": user["_id"], "created_at": utc_now(), "updated_at": utc_now()})
-                db.availability.insert_one(values)
+                result = db.availability.insert_one(values)
+                if wants_json_response():
+                    return jsonify({
+                        "entry": {
+                            "id": str(result.inserted_id),
+                            "day": values["day"],
+                            "start_time": values["start_time"],
+                            "end_time": values["end_time"],
+                        }
+                    })
                 flash("Availability window added.", "success")
             return redirect(url_for(
                 "member_availability",
@@ -1872,6 +2002,8 @@ def create_app(database_override=None):
         except json.JSONDecodeError:
             changes = None
         if not isinstance(changes, list):
+            if wants_json_response():
+                return jsonify({"error": "Availability changes could not be read."}), 400
             flash("Availability changes could not be read.", "error")
             return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
 
@@ -1882,6 +2014,8 @@ def create_app(database_override=None):
         changes_to_apply = []
         for change in changes:
             if not isinstance(change, dict) or change.get("id") not in existing:
+                if wants_json_response():
+                    return jsonify({"error": "One of the availability windows could not be found."}), 400
                 flash("One of the availability windows could not be found.", "error")
                 return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
             entry = existing[change["id"]]
@@ -1894,6 +2028,8 @@ def create_app(database_override=None):
                 change.get("end_time", ""),
             )
             if error:
+                if wants_json_response():
+                    return jsonify({"error": error}), 400
                 flash(error, "error")
                 return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
             values["updated_at"] = utc_now()
@@ -1906,7 +2042,11 @@ def create_app(database_override=None):
             else:
                 db.availability.update_one({"_id": entry_id}, {"$set": values})
         if changes_to_apply:
+            if wants_json_response():
+                return jsonify({"ok": True})
             flash("Availability changes saved.", "success")
+        elif wants_json_response():
+            return jsonify({"ok": True})
         return redirect(url_for("member_availability", user_id=user_id, return_to=return_to))
 
     @app.post("/availability/<availability_id>/edit")
@@ -1922,10 +2062,21 @@ def create_app(database_override=None):
             abort(403)
         values, error = validate_availability(request.form)
         if error:
+            if wants_json_response():
+                return jsonify({"error": error}), 400
             flash(error, "error")
         else:
             values["updated_at"] = utc_now()
             db.availability.update_one({"_id": entry_id}, {"$set": values})
+            if wants_json_response():
+                return jsonify({
+                    "entry": {
+                        "id": str(entry_id),
+                        "day": values["day"],
+                        "start_time": values["start_time"],
+                        "end_time": values["end_time"],
+                    }
+                })
             flash("Availability window updated.", "success")
         return_to, _return_label = availability_return_context()
         return redirect(url_for("member_availability", user_id=entry["user_id"], return_to=return_to))
@@ -1941,6 +2092,8 @@ def create_app(database_override=None):
         if not member_can_manage(user):
             abort(403)
         db.availability.delete_one({"_id": entry["_id"]})
+        if wants_json_response():
+            return jsonify({"ok": True, "id": str(entry["_id"])})
         flash("Availability window deleted.", "success")
         return_to, _return_label = availability_return_context()
         return redirect(url_for("member_availability", user_id=entry["user_id"], return_to=return_to))

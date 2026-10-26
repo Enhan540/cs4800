@@ -3,6 +3,8 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
+from services.availability_service import effective_availability_for_date
+
 DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
@@ -70,41 +72,34 @@ def _make_result(current, start, end, available_ids, all_members, requested_dura
     }
 
 
-def _effective_blocks(member_id, current, intervals, busy_intervals_by_member):
-    """Return recurring daily blocks minus cached calendar busy time."""
-    blocks = list(intervals.get((member_id, current.strftime("%A")), []))
-    busy = busy_intervals_by_member.get(str(member_id), []) if busy_intervals_by_member else []
-    for interval in busy:
-        try:
-            busy_start = interval["start"]
-            busy_end = interval["end"]
-            if isinstance(busy_start, str):
-                busy_start = datetime.fromisoformat(busy_start.replace("Z", "+00:00")).replace(tzinfo=None)
-            if isinstance(busy_end, str):
-                busy_end = datetime.fromisoformat(busy_end.replace("Z", "+00:00")).replace(tzinfo=None)
-            day_start = datetime.combine(current, datetime.min.time())
-            start = max(0, int((busy_start - day_start).total_seconds() // 60))
-            end = min(24 * 60, int((busy_end - day_start).total_seconds() // 60))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if end <= start:
-            continue
-        remaining = []
-        for block_start, block_end in blocks:
-            if end <= block_start or start >= block_end:
-                remaining.append((block_start, block_end))
-            else:
-                if block_start < start:
-                    remaining.append((block_start, start))
-                if end < block_end:
-                    remaining.append((end, block_end))
-        blocks = remaining
-    return blocks
+def _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name):
+    """Return recurring daily blocks minus cached date-specific conflicts."""
+    records = [
+        {
+            "user_id": member_id,
+            "day": current.strftime("%A"),
+            "start_time": f"{start // 60:02d}:{start % 60:02d}",
+            "end_time": f"{end // 60:02d}:{end % 60:02d}",
+        }
+        for start, end in intervals.get((str(member_id), current.strftime("%A")), [])
+    ]
+    day_start = datetime.combine(current, datetime.min.time())
+    effective = effective_availability_for_date(
+        records,
+        member_id,
+        current,
+        calendar_busy_intervals=(busy_intervals_by_member or {}).get(str(member_id), []),
+        timezone_name=timezone_name,
+    )
+    return [
+        (int((start - day_start).total_seconds() // 60), int((end - day_start).total_seconds() // 60))
+        for start, end in effective
+    ]
 
 
 def _exact_matches_for_day(
     current, members, intervals, earliest, latest, duration_minutes, minimum_attendance, increment_minutes,
-    busy_intervals_by_member,
+    busy_intervals_by_member, timezone_name,
 ):
     day = current.strftime("%A")
     latest_start = latest - duration_minutes
@@ -113,7 +108,7 @@ def _exact_matches_for_day(
 
     candidate_starts = set(range(earliest, latest_start + 1, increment_minutes))
     for member_id in members:
-        for block_start, _block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member):
+        for block_start, _block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name):
             if earliest <= block_start <= latest_start:
                 candidate_starts.add(block_start)
 
@@ -125,7 +120,7 @@ def _exact_matches_for_day(
             for member_id in members
             if any(
                 block_start <= candidate_start and block_end >= candidate_end
-                for block_start, block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member)
+                for block_start, block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name)
             )
         ]
         if len(available_ids) >= minimum_attendance:
@@ -138,13 +133,14 @@ def _exact_matches_for_day(
 
 
 def _alternative_matches_for_day(
-    current, members, intervals, earliest, latest, duration_minutes, minimum_attendance, busy_intervals_by_member
+    current, members, intervals, earliest, latest, duration_minutes, minimum_attendance,
+    busy_intervals_by_member, timezone_name,
 ):
     """Find maximal shorter windows for stable attendee sets on one weekday."""
     day = current.strftime("%A")
     candidate_starts = {earliest}
     for member_id in members:
-        for block_start, _block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member):
+        for block_start, _block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name):
             if earliest <= block_start < latest:
                 candidate_starts.add(block_start)
 
@@ -155,7 +151,7 @@ def _alternative_matches_for_day(
         for member_id in members:
             ends = [
                 min(block_end, latest)
-                for block_start, block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member)
+                for block_start, block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name)
                 if block_start <= candidate_start < block_end and min(block_end, latest) > candidate_start
             ]
             if ends:
@@ -186,7 +182,7 @@ def _alternative_matches_for_day(
 def find_matching_times(
     *, member_ids, availability_records, start_date, end_date, duration_minutes,
     earliest_time=None, latest_time=None, minimum_attendance=1, max_results=10,
-    increment_minutes=30, busy_intervals_by_member=None,
+    increment_minutes=30, busy_intervals_by_member=None, timezone_name="UTC",
 ):
     """Return full-duration matches, or the best shorter alternatives if none exist."""
     start = parse_date(start_date)
@@ -214,13 +210,13 @@ def find_matching_times(
         exact_matches.extend(
             _exact_matches_for_day(
                 current, members, intervals, earliest, latest, duration_minutes,
-                minimum_attendance, increment_minutes, busy_intervals_by_member,
+                minimum_attendance, increment_minutes, busy_intervals_by_member, timezone_name,
             )
         )
         alternatives.extend(
             _alternative_matches_for_day(
                 current, members, intervals, earliest, latest, duration_minutes, minimum_attendance,
-                busy_intervals_by_member,
+                busy_intervals_by_member, timezone_name,
             )
         )
         current += timedelta(days=1)

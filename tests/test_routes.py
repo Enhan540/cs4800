@@ -1,10 +1,13 @@
 import json
 import os
+import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import mongomock
 import pytest
 from bson import ObjectId
+from cryptography.fernet import Fernet
 
 os.environ["MONGO_URI"] = ""
 from app import create_app
@@ -316,16 +319,145 @@ def test_group_availability_matrix_renders_members_windows_and_empty_cells(app_a
          "start_time": "16:00", "end_time": "20:00", "status": "available"},
     ])
 
-    page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
+    page = app.test_client().get(
+        f"/groups/{group_id}?week_start=2026-10-26"
+    ).get_data(as_text=True)
 
-    assert "Weekly Availability" in page
-    assert "Recurring availability shown below" in page
+    assert "Group Availability" in page
+    assert "Effective availability for the selected week." in page
+    assert "Oct 26" in page
+    assert "Normally available" in page
     assert all(name in page for name in member_ids)
     assert "5:00 PM–9:00 PM" in page
     assert "9:00 AM–12:00 PM" in page
     assert "4:00 PM–8:00 PM" in page
     assert "—" in page
     assert page.count("Edit availability") >= 3
+
+
+def test_group_availability_maps_week_dates_and_hides_calendar_event_details(app_and_db):
+    app, database = app_and_db
+    account_id = ObjectId()
+    member_id = database.users.insert_one({
+        "display_name": "Alex", "normalized_name": "alex", "linked_account_id": account_id,
+    }).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    database.availability.insert_one({
+        "user_id": member_id, "day": "Friday", "day_order": 4,
+        "start_time": "15:00", "end_time": "23:00", "status": "available",
+    })
+    database.calendar_connections.insert_one({
+        "account_id": account_id, "provider": "ical", "sync_status": "connected",
+        "busy_intervals": [{
+            "start": datetime(2026, 10, 31, 1), "end": datetime(2026, 10, 31, 2, 30),
+            "summary": "Private event that must not be exposed",
+        }],
+    })
+
+    page = app.test_client().get(
+        f"/groups/{group_id}?week_start=2026-10-26"
+    ).get_data(as_text=True)
+
+    assert "Fri" in page and "30" in page
+    assert "availability-effective" in page
+    assert "availability-conflict" in page
+    assert "Calendar conflict" in page
+    assert "Private event that must not be exposed" not in page
+    assert "week_start=2026-11-02" in page
+    assert "week_start=2026-10-19" in page
+
+
+def test_group_page_order_dynamic_heatmap_start_and_pacific_ical_count(app_and_db):
+    app, database = app_and_db
+    guest1_account, guest2_account = ObjectId(), ObjectId()
+    guest1 = database.users.insert_one({
+        "display_name": "guest1", "normalized_name": "guest1",
+        "linked_account_id": guest1_account,
+    }).inserted_id
+    guest2 = database.users.insert_one({
+        "display_name": "guest2", "normalized_name": "guest2",
+        "linked_account_id": guest2_account,
+    }).inserted_id
+    group_id = make_group(database, member_ids=[guest1, guest2])
+    database.availability.insert_many([
+        {"user_id": guest1, "day": "Monday", "day_order": 0, "start_time": "08:00", "end_time": "12:00"},
+        {"user_id": guest2, "day": "Monday", "day_order": 0, "start_time": "08:00", "end_time": "12:00"},
+    ])
+    database.calendar_connections.insert_one({
+        "account_id": guest2_account,
+        "provider": "ical",
+        "sync_status": "connected",
+        "busy_intervals": [{
+            "start": datetime(2026, 10, 26, 16),
+            "end": datetime(2026, 10, 26, 16, 50),
+        }],
+    })
+
+    page = app.test_client().get(
+        f"/groups/{group_id}?week_start=2026-10-26"
+    ).get_data(as_text=True)
+
+    assert page.index("<h1>") < page.index("<h2>Upcoming Plans")
+    assert page.index("<h2>Upcoming Plans") < page.index("<h2>Planning")
+    assert page.index("<h2>Planning") < page.index("<h2>Group Availability")
+    assert page.index("<h2>Group Availability") < page.index("<h2>Members")
+    assert 'data-resolution-minutes="30"' in page
+    assert 'data-start-minutes="420"' in page
+    assert 'data-start-minutes="540"' in page
+    assert 'data-available-count="1"' in page
+    assert 'data-start-minutes="960" data-available-count="2"' not in page
+
+
+def test_group_heatmap_start_clamps_at_midnight(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one({
+        "display_name": "Early", "normalized_name": "early",
+    }).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": "00:30", "end_time": "02:00",
+    })
+    page = app.test_client().get(
+        f"/groups/{group_id}?week_start=2026-10-26"
+    ).get_data(as_text=True)
+    assert 'data-start-minutes="0"' in page
+
+
+def test_sync_now_replaces_stale_shifted_ical_cache(app_and_db, monkeypatch):
+    app, database = app_and_db
+    payload = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Group Planner Test//EN
+BEGIN:VEVENT
+UID:known-time@example.test
+DTSTART;TZID=America/Los_Angeles:20261026T090000
+DTEND;TZID=America/Los_Angeles:20261026T095000
+END:VEVENT
+END:VCALENDAR
+"""
+    monkeypatch.setattr("app.fetch_calendar_url", lambda _url: payload)
+    key = base64.urlsafe_b64encode(hashlib.sha256(b"test-secret").digest())
+    encrypted = Fernet(key).encrypt(json.dumps({"url": "https://calendar.example/test.ics"}).encode()).decode()
+    connection_id = database.calendar_connections.insert_one({
+        "account_id": None,
+        "provider": "ical",
+        "secret_ciphertext": encrypted,
+        "sync_status": "connected",
+        "busy_intervals": [{
+            "start": datetime(2026, 10, 26, 23),
+            "end": datetime(2026, 10, 26, 23, 50),
+        }],
+    }).inserted_id
+
+    response = app.test_client().post(f"/account/calendars/{connection_id}/sync")
+    updated = database.calendar_connections.find_one({"_id": connection_id})
+
+    assert response.status_code == 302
+    assert updated["busy_intervals"] == [{
+        "start": datetime(2026, 10, 26, 16),
+        "end": datetime(2026, 10, 26, 16, 50),
+    }]
 
 
 def test_plan_actions_are_ordered_for_planning_and_scheduled_states(app_and_db):
@@ -357,13 +489,14 @@ def test_group_page_separates_planning_and_scheduled_plans_without_duplicates(ap
     member_id = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
     group_id = make_group(database, member_ids=[member_id])
     make_plan(database, group_id, title="Needs A Time")
+    future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=2)
     make_plan(
         database,
         group_id,
         title="Confirmed Event",
         status="scheduled",
-        scheduled_start=datetime(2026, 10, 24, 19, 0),
-        scheduled_end=datetime(2026, 10, 24, 21, 0),
+        scheduled_start=future,
+        scheduled_end=future + timedelta(hours=2),
         rsvps={},
     )
 
@@ -379,15 +512,17 @@ def test_group_page_separates_planning_and_scheduled_plans_without_duplicates(ap
 def test_scheduled_plans_are_sorted_chronologically(app_and_db):
     app, database = app_and_db
     group_id = make_group(database)
+    sooner = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=2)
+    later = sooner + timedelta(days=2)
     make_plan(
         database, group_id, title="Later Event", status="scheduled",
-        scheduled_start=datetime(2026, 10, 26, 19, 0),
-        scheduled_end=datetime(2026, 10, 26, 21, 0),
+        scheduled_start=later,
+        scheduled_end=later + timedelta(hours=2),
     )
     make_plan(
         database, group_id, title="Sooner Event", status="scheduled",
-        scheduled_start=datetime(2026, 10, 24, 19, 0),
-        scheduled_end=datetime(2026, 10, 24, 21, 0),
+        scheduled_start=sooner,
+        scheduled_end=sooner + timedelta(hours=2),
     )
 
     page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
@@ -669,10 +804,11 @@ def test_dashboard_shows_upcoming_but_not_global_planning_with_group_names(app_a
     app, database = app_and_db
     group_id = make_group(database, name="College Friends")
     make_plan(database, group_id, title="Beach Trip")
+    future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=2)
     make_plan(
         database, group_id, title="Movie Night", status="scheduled",
-        scheduled_start=datetime(2026, 10, 23, 19, 0),
-        scheduled_end=datetime(2026, 10, 23, 21, 0), rsvps={},
+        scheduled_start=future,
+        scheduled_end=future + timedelta(hours=2), rsvps={},
     )
 
     page = app.test_client().get("/").get_data(as_text=True)
@@ -871,8 +1007,8 @@ def test_group_hierarchy_and_upcoming_count_exclude_past_and_planning(app_and_db
     page = app.test_client().get(f"/groups/{group_id}").get_data(as_text=True)
 
     assert page.index("<h2>Upcoming Plans") < page.index("<h2>Planning")
-    assert page.index("<h2>Planning") < page.index("<h2>Weekly Availability")
-    assert page.index("<h2>Weekly Availability") < page.index("<h2>Members")
+    assert page.index("<h2>Planning") < page.index("<h2>Group Availability")
+    assert page.index("<h2>Group Availability") < page.index("<h2>Members")
     assert "Future Event" in page
     assert "Past Event" not in page
     assert "1 upcoming plan" in page
@@ -1032,6 +1168,67 @@ def test_current_availability_shows_every_day_and_weekly_overview(app_and_db):
     assert 'data-availability-edit>Edit<' in page
 
 
+def test_weekly_overview_uses_canonical_full_day_columns_for_all_seven_days(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    days = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+    database.availability.insert_many([
+        {
+            "user_id": member_id, "day": day, "day_order": index,
+            "start_time": "12:30", "end_time": "15:00",
+        }
+        for index, day in enumerate(days)
+    ] + [{
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": "17:00", "end_time": "20:30",
+    }])
+
+    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+
+    for day in days:
+        assert f'data-availability-calendar-day="{day}" data-day="{day}"' in page
+        assert f'data-day="{day}" data-start-time="12:30 PM"' in page
+    assert page.count('data-day="Monday" data-start-time=') == 2
+    assert 'data-day-availability-dialog' in page
+
+
+def test_empty_day_is_clickable_and_day_dialog_starts_read_only(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+
+    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+
+    assert 'aria-label="Open Wednesday availability" data-availability-calendar-day="Wednesday"' in page
+    assert 'data-day-availability-dialog' in page
+    assert 'data-day-dialog-close' in page
+    assert 'data-day-dialog-cancel hidden>Cancel<' in page
+    assert 'data-day-dialog-save hidden>Save<' in page
+    assert 'data-day-dialog-exit' not in page
+    assert 'data-day-dialog-edit' not in page
+    assert 'data-day-delete-dialog' in page
+    assert 'data-day-delete-confirm' in page
+
+
+def test_day_popup_delete_is_staged_through_existing_bulk_save_contract(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+    javascript = app.test_client().get("/static/js/app.js").get_data(as_text=True)
+
+    assert 'data-day-delete-dialog' in page
+    assert 'data-day-delete-confirm' in page
+    assert 'data-day-window-delete' in javascript
+    assert 'deleted: true' in javascript
+    assert 'captureActiveWindow();' in javascript
+    assert 'data-day-dialog-save' in page
+
+
 def test_add_availability_preserves_selected_day_and_time_values(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one(
@@ -1047,6 +1244,50 @@ def test_add_availability_preserves_selected_day_and_time_values(app_and_db):
     assert "selected_day=Thursday" in response.headers["Location"]
     assert "start_time=14:30" in response.headers["Location"]
     assert "end_time=17:45" in response.headers["Location"]
+
+
+def test_async_add_availability_returns_entry_without_navigation(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    response = app.test_client().post(
+        f"/users/{member_id}/availability",
+        data={
+            "day": "Monday", "start_time": "12:30 PM", "end_time": "03:00 PM",
+        },
+        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json["entry"]["day"] == "Monday"
+    assert response.json["entry"]["start_time"] == "12:30"
+    assert database.availability.count_documents({"user_id": member_id}) == 1
+
+
+def test_async_window_edit_and_delete_return_json(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    entry_id = database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": "12:30", "end_time": "15:00",
+    }).inserted_id
+    headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+    edited = app.test_client().post(
+        f"/availability/{entry_id}/edit",
+        data={"day": "Monday", "start_time": "01:00 PM", "end_time": "04:00 PM"},
+        headers=headers,
+    )
+    deleted = app.test_client().post(f"/availability/{entry_id}/delete", headers=headers)
+
+    assert edited.status_code == 200
+    assert edited.json["entry"]["id"] == str(entry_id)
+    assert edited.json["entry"]["start_time"] == "13:00"
+    assert deleted.status_code == 200
+    assert deleted.json["id"] == str(entry_id)
+    assert database.availability.find_one({"_id": entry_id}) is None
 
 
 def test_bulk_availability_edit_updates_and_removes_only_when_saved(app_and_db):
@@ -1072,6 +1313,33 @@ def test_bulk_availability_edit_updates_and_removes_only_when_saved(app_and_db):
     assert database.availability.find_one({"_id": first_id})["start_time"] == "09:05"
     assert database.availability.find_one({"_id": first_id})["end_time"] == "10:50"
     assert database.availability.find_one({"_id": second_id}) is None
+
+
+def test_bulk_availability_edit_validates_all_staged_windows_before_writing(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one(
+        {"display_name": "Alex", "normalized_name": "alex"}
+    ).inserted_id
+    first_id, second_id = [database.availability.insert_one({
+        "user_id": member_id, "day": "Monday", "day_order": 0,
+        "start_time": start, "end_time": end,
+    }).inserted_id for start, end in (("09:00", "10:00"), ("14:00", "15:00"))]
+    payload = [
+        {"id": str(first_id), "start_time": "09:30", "end_time": "11:00", "deleted": False},
+        {"id": str(second_id), "start_time": "16:00", "end_time": "15:00", "deleted": False},
+    ]
+
+    response = app.test_client().post(
+        f"/users/{member_id}/availability/bulk-edit",
+        data={"availability_payload": json.dumps(payload)},
+        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+    )
+
+    assert response.status_code == 400
+    first = database.availability.find_one({"_id": first_id})
+    second = database.availability.find_one({"_id": second_id})
+    assert (first["start_time"], first["end_time"]) == ("09:00", "10:00")
+    assert (second["start_time"], second["end_time"]) == ("14:00", "15:00")
 
 
 @pytest.mark.parametrize(

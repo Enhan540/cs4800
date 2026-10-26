@@ -99,3 +99,23 @@ def test_calendar_busy_interval_is_subtracted_from_recurring_availability():
         ("18:00", "19:00"),
         ("20:00", "21:00"),
     ]
+
+
+def test_smart_plan_finder_uses_same_pacific_calendar_conversion_as_group_view():
+    matches = find_matching_times(
+        member_ids=["A"],
+        availability_records=[block("A", "08:00", "12:00", day="Monday")],
+        start_date="2026-10-26",
+        end_date="2026-10-26",
+        duration_minutes=15,
+        minimum_attendance=1,
+        increment_minutes=15,
+        timezone_name="America/Los_Angeles",
+        busy_intervals_by_member={
+            "A": [{"start": "2026-10-26T16:00:00", "end": "2026-10-26T16:50:00"}],
+        },
+    )
+    windows = {(match["start_time"], match["end_time"]) for match in matches}
+    assert ("08:45", "09:00") in windows
+    assert ("09:00", "09:15") not in windows
+    assert ("09:50", "10:05") in windows
