@@ -1,7 +1,6 @@
-name: Test and Deploy to AWS EC2
+name: Test
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -23,22 +22,3 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Run tests
         run: pytest -q
-
-  deploy:
-    if: github.event_name == 'workflow_dispatch'
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy latest main branch to EC2
-        uses: appleboy/ssh-action@v1.2.1
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-            cd ${{ secrets.EC2_APP_PATH }}
-            git fetch origin main
-            git reset --hard origin/main
-            .venv/bin/pip install -r requirements.txt
-            sudo systemctl restart cs4800-availability

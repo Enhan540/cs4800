@@ -249,17 +249,17 @@ The repository does not currently commit a `vercel.json` or a production URL, so
 
 `.github/workflows/deploy.yml` runs the test job on pushes to `main`, pull requests targeting `main`, and manual workflow runs. It installs the development dependencies and runs `pytest -q`.
 
-The EC2 job remains in the workflow for later use, but it is manual-only. It has `needs: test` and runs only when the workflow is started with **Run workflow** (`workflow_dispatch`). A normal push to `main` runs tests and skips EC2 deployment.
+The repository's GitHub Actions workflow is test-only. Production deployment is handled by Vercel's Git integration; no EC2 deployment job runs from this repository.
 
-### Optional EC2/Gunicorn path
+### Archived EC2/Gunicorn path
 
-For a later EC2 deployment, the retained production entry point is:
+An EC2/Gunicorn deployment is no longer part of the active workflow. The old entry point, if needed for historical reference, was:
 
 ```bash
 gunicorn --workers 2 --bind 0.0.0.0:5000 app:app
 ```
 
-Create the environment file directly on the server and configure the existing `cs4800-availability` systemd service. The manual workflow expects these GitHub repository secrets:
+If an EC2 deployment is intentionally reintroduced later, it would require an environment file and a systemd service. The old workflow used these secrets:
 
 - `EC2_HOST`
 - `EC2_USER`
