@@ -982,7 +982,11 @@ def create_app(database_override=None):
                     headers={"Authorization": f"Bearer {token}"},
                     json={
                         "timeMin": now.isoformat(),
-                        "timeMax": (now + timedelta(days=366)).isoformat(),
+                        # Google FreeBusy accepts at most a one-year window.
+                        # Use 365 days rather than 366 so this remains valid
+                        # across leap years and deployment dates.
+                        "timeMax": (now + timedelta(days=365)).isoformat(),
+                        "timeZone": app.config["APP_TIMEZONE"],
                         "items": [{"id": "primary"}],
                     },
                     timeout=(3.05, 15),
@@ -1012,10 +1016,17 @@ def create_app(database_override=None):
                         headers={"Authorization": f"Bearer {token}"},
                         json={
                             "timeMin": now.isoformat(),
-                            "timeMax": (now + timedelta(days=366)).isoformat(),
+                            "timeMax": (now + timedelta(days=365)).isoformat(),
+                            "timeZone": app.config["APP_TIMEZONE"],
                             "items": [{"id": "primary"}],
                         },
                         timeout=(3.05, 15),
+                    )
+                if not response.ok:
+                    app.logger.error(
+                        "Google Calendar FreeBusy request failed: status=%s body=%s",
+                        response.status_code,
+                        response.text[:500],
                     )
                 response.raise_for_status()
                 intervals = [
