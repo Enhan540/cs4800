@@ -35,6 +35,7 @@
 
 {% if can_invite %}<dialog class="app-dialog invite-dialog" id="invite-dialog"><div class="dialog-heading"><div><p class="eyebrow">Group invitation</p><h2>Invite to {{ group.name }}</h2></div><button class="icon-button" type="button" data-dialog-close aria-label="Close">×</button></div><p class="muted">Search by username. The account holder must accept before joining the group.</p><form method="post" action="{{ url_for('invite_group_account', group_id=group._id) }}" data-invite-form><label for="invite-username">Username<input id="invite-username" name="username" autocomplete="off" minlength="2" required data-invite-search="{{ url_for('search_group_invitation_accounts', group_id=group._id) }}"></label><div class="invite-search-results" data-invite-results aria-live="polite"></div><div class="dialog-actions"><button class="button secondary" type="button" data-dialog-close>Cancel</button><button class="button" type="submit">Send Invitation</button></div></form></dialog>{% endif %}
 
+{% include 'partials/pending_group_invites.html' %}
 {% for member in members %}
   {% set role = group.get('account_roles', {}).get(member.linked_account_id|string, 'member') if member.linked_account_id else 'member' %}
   {% set is_owner = member.linked_account_id == group.owner_account_id %}

@@ -1,0 +1,14 @@
+<aside class="app-sidebar" data-app-sidebar aria-label="Primary navigation">
+  <div class="sidebar-brand"><a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-mark">G</span><span>Group Planner</span></a><button class="sidebar-close icon-button" type="button" data-sidebar-close aria-label="Close navigation">×</button></div>
+  <nav class="sidebar-nav" aria-label="Main navigation">
+    <a class="sidebar-link{% if request.endpoint == 'dashboard' %} is-active{% endif %}" href="{{ url_for('dashboard') }}"><span aria-hidden="true">⌂</span><span>Dashboard</span></a>
+    <a class="sidebar-link{% if request.endpoint in ['groups', 'create_group', 'edit_group', 'group_detail', 'create_plan', 'edit_plan', 'plan_detail'] %} is-active{% endif %}" href="{{ url_for('groups') }}"><span aria-hidden="true">○</span><span>Groups</span>{% if sidebar_groups %}<b>{{ sidebar_groups|length }}</b>{% endif %}</a>
+    <a class="sidebar-link{% if request.endpoint in ['account_availability', 'member_availability', 'bulk_edit_availability'] %} is-active{% endif %}" href="{{ url_for('account_availability') }}"><span aria-hidden="true">◷</span><span>Availability</span></a>
+    <button class="sidebar-link sidebar-link-button" type="button" data-notification-open><span aria-hidden="true">♢</span><span>Notifications</span>{% if notification_unread_count %}<b class="sidebar-unread-count">{{ notification_unread_count }}</b>{% endif %}</button>
+  </nav>
+  <div class="sidebar-group-heading"><span>Quick groups</span><small>{{ sidebar_groups|length }} active</small></div>
+  <div class="sidebar-groups">{% for group in sidebar_groups %}<a class="sidebar-group" href="{{ url_for('group_detail', group_id=group._id) }}"><span class="sidebar-group-dot" aria-hidden="true"></span><span>{{ group.name }}</span><small>{{ group.member_ids|length }}</small></a>{% endfor %}</div>
+  <a class="sidebar-new-group" href="{{ url_for('create_group') }}">+ New Group</a>
+  <div class="sidebar-footer"><a class="sidebar-profile" href="{{ url_for('account') }}"><span class="account-avatar">{{ current_user.username[:2]|upper }}</span><span><strong>{{ current_user.username }}</strong><small>Account settings</small></span><span aria-hidden="true">⚙</span></a><form method="post" action="{{ url_for('logout') }}"><button class="sidebar-logout" type="submit">Log Out</button></form></div>
+</aside>
+<button class="sidebar-backdrop" type="button" data-sidebar-close aria-label="Close navigation"></button>

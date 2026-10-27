@@ -1,0 +1,6 @@
+{% if pending_invitees %}
+<section class="card pending-invitations-card content-section">
+  <div class="section-heading"><div><h2>Pending Invitations <span class="count">{{ pending_invitees|length }}</span></h2><p class="muted small section-subtitle">These accounts have not joined the group yet.</p></div></div>
+  <div class="member-list pending-member-list">{% for item in pending_invitees %}<div class="member-row pending-member-row"><span class="member-chip"><span class="member-avatar" aria-hidden="true">{{ item.account.username[:1]|upper }}</span><span class="member-chip-copy"><strong>{{ item.account.username }}</strong><small>Invited</small></span></span>{% if can_invite %}<form method="post" action="{{ url_for('retract_group_invitation', group_id=group._id, invitation_id=item.invite._id) }}" data-confirm="Retract this invitation? They will no longer be able to accept it."><button class="button secondary pending-retract-button" type="submit">Retract Invite</button></form>{% endif %}</div>{% endfor %}</div>
+</section>
+{% endif %}

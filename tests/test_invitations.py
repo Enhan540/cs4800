@@ -37,13 +37,30 @@ def test_owner_invitation_is_pending_until_acceptance(invitation_app_and_db):
     )
     invite = database.group_invites.find_one({"group_id": group["_id"]})
     assert invite["status"] == "pending"
+    notification = database.notifications.find_one({
+        "recipient_user_id": alex["_id"],
+        "type": "GROUP_INVITE",
+        "invite_id": invite["_id"],
+        "status": "unresolved",
+    })
+    assert notification is not None
+    invited_notifications = invited_client.get("/api/notifications").get_json()
+    assert any(item["id"] == str(notification["_id"]) for item in invited_notifications["notifications"])
+    assert owner_client.get("/api/notifications").get_json()["notifications"] == []
+    assert invited_client.get("/api/notifications/summary").get_json()["unread_count"] == 1
     assert alex["_id"] not in database.groups.find_one({"_id": group["_id"]})["account_ids"]
+    group_page = owner_client.get(f"/groups/{group['_id']}").get_data(as_text=True)
+    assert "Pending Invitations" in group_page
+    assert "alex123" in group_page
+    assert "Members · 2" not in group_page
     assert b"Group Invitations" in invited_client.get("/dashboard").data
 
     invited_client.post(f"/invitations/{invite['_id']}/accept")
     updated_group = database.groups.find_one({"_id": group["_id"]})
     assert alex["_id"] in updated_group["account_ids"]
     assert database.group_invites.find_one({"_id": invite["_id"]})["status"] == "accepted"
+    assert database.notifications.find_one({"_id": notification["_id"]})["status"] == "resolved"
+    assert invited_client.get("/api/notifications").get_json()["notifications"] == []
 
 
 def test_invitation_rules_and_decline(invitation_app_and_db):
@@ -73,6 +90,23 @@ def test_invitation_rules_and_decline(invitation_app_and_db):
     assert database.group_invites.find_one({"_id": invite["_id"]})["status"] == "declined"
 
 
+def test_owner_can_retract_invitation_and_reinvite(invitation_app_and_db):
+    app, database = invitation_app_and_db
+    owner = app.test_client(); target = app.test_client()
+    register(owner, "owner-one")
+    owner.post("/groups/create", data={"name": "Retract Group", "description": ""})
+    group = database.groups.find_one({"name": "Retract Group"})
+    register(target, "retract-target")
+    owner.post(f"/groups/{group['_id']}/invitations", data={"username": "retract-target"})
+    invite = database.group_invites.find_one({"group_id": group["_id"], "status": "pending"})
+    response = owner.post(f"/groups/{group['_id']}/invitations/{invite['_id']}/retract")
+    assert response.status_code == 302
+    assert database.group_invites.find_one({"_id": invite["_id"]})["status"] == "revoked"
+    assert target.get("/api/notifications").get_json()["notifications"] == []
+    owner.post(f"/groups/{group['_id']}/invitations", data={"username": "retract-target"})
+    assert database.group_invites.count_documents({"group_id": group["_id"], "status": "pending"}) == 1
+
+
 def test_group_member_ui_uses_invite_and_per_member_settings(invitation_app_and_db):
     app, database = invitation_app_and_db
     client = app.test_client()
@@ -83,6 +117,20 @@ def test_group_member_ui_uses_invite_and_per_member_settings(invitation_app_and_
     assert "+ Invite" in page
     assert "Manage Members" not in page
     assert "Create New Member" not in page
+
+
+def test_authenticated_shell_has_real_sidebar_and_public_pages_do_not(invitation_app_and_db):
+    app, _database = invitation_app_and_db
+    public_page = app.test_client().get("/").get_data(as_text=True)
+    assert "app-sidebar" not in public_page
+
+    client = app.test_client()
+    register(client, "sidebar-user")
+    page = client.get("/dashboard").get_data(as_text=True)
+    assert "app-sidebar" in page
+    assert "data-notification-open" in page
+    assert "data-notification-drawer" in page
+    assert "Vercel" not in page
 
 
 def test_member_settings_hides_permissions_for_member_role(invitation_app_and_db):

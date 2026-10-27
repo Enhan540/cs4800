@@ -10,53 +10,20 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@600;700&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
-<body>
-  <header class="site-header">
-    <div class="container header-content">
-      <a class="brand" href="{{ url_for('dashboard') if current_user.is_authenticated else url_for('index') }}" aria-label="Group Planner home">
-        <span class="brand-mark" aria-hidden="true">G</span>
-        <span>Group Planner</span>
-      </a>
-      {% if current_user.is_authenticated %}
-        <nav class="main-nav" aria-label="Main navigation">
-          <a class="nav-link{% if request.endpoint == 'dashboard' %} is-active{% endif %}" href="{{ url_for('dashboard') }}"{% if request.endpoint == 'dashboard' %} aria-current="page"{% endif %}>Dashboard</a>
-          <a class="nav-link{% if request.endpoint in ['groups', 'create_group', 'edit_group', 'group_detail', 'create_plan', 'edit_plan', 'plan_detail'] %} is-active{% endif %}" href="{{ url_for('groups') }}"{% if request.endpoint in ['groups', 'create_group', 'edit_group', 'group_detail', 'create_plan', 'edit_plan', 'plan_detail'] %} aria-current="page"{% endif %}>My Groups</a>
-          <a class="nav-link{% if request.endpoint in ['account_availability', 'member_availability', 'bulk_edit_availability'] %} is-active{% endif %}" href="{{ url_for('account_availability') }}"{% if request.endpoint in ['account_availability', 'member_availability', 'bulk_edit_availability'] %} aria-current="page"{% endif %}>Availability</a>
-          <details class="user-menu"><summary class="account-avatar" aria-label="Open user menu">{{ current_user.username[:2]|upper }}<span aria-hidden="true">▾</span></summary><div class="user-menu-panel"><strong>{{ current_user.username }}</strong><a href="{{ url_for('account') }}">Account</a><form method="post" action="{{ url_for('logout') }}"><button type="submit">Log Out</button></form></div></details>
-        </nav>
-      {% else %}
-        <nav class="main-nav" aria-label="Main navigation">
-          <a class="nav-link{% if request.endpoint == 'index' %} is-active{% endif %}" href="{{ url_for('index') }}"{% if request.endpoint == 'index' %} aria-current="page"{% endif %}>Home</a>
-          <a class="nav-link{% if request.endpoint == 'login' %} is-active{% endif %}" href="{{ url_for('login') }}"{% if request.endpoint == 'login' %} aria-current="page"{% endif %}>Log In</a>
-          <a class="button nav-cta" href="{{ url_for('register') }}">Get Started</a>
-        </nav>
-      {% endif %}
-    </div>
-  </header>
-  <main class="container page-shell">
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        <div class="messages" aria-live="polite">
-          {% for category, message in messages %}<p class="message {{ category }}">{{ message }}</p>{% endfor %}
-        </div>
-      {% endif %}
-    {% endwith %}
+<body class="{% if current_user.is_authenticated %}authenticated-shell{% else %}public-shell{% endif %}">
+  {% if current_user.is_authenticated %}
+    {% include 'partials/sidebar.html' %}
+    <button class="mobile-menu-button icon-button" type="button" data-sidebar-open aria-label="Open navigation">☰</button>
+  {% else %}
+    <header class="site-header"><div class="container header-content"><a class="brand" href="{{ url_for('index') }}" aria-label="Group Planner home"><span class="brand-mark">G</span><span>Group Planner</span></a><nav class="main-nav" aria-label="Public navigation"><a class="nav-link{% if request.endpoint == 'index' %} is-active{% endif %}" href="{{ url_for('index') }}">Home</a><a class="nav-link{% if request.endpoint == 'login' %} is-active{% endif %}" href="{{ url_for('login') }}">Log In</a><a class="button nav-cta" href="{{ url_for('register') }}">Get Started</a></nav></div></header>
+  {% endif %}
+  <main class="{% if current_user.is_authenticated %}app-main{% else %}container page-shell{% endif %}">
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="messages" aria-live="polite">{% for category, message in messages %}<p class="message {{ category }}">{{ message }}</p>{% endfor %}</div>{% endif %}{% endwith %}
     {% block content %}{% endblock %}
   </main>
-  <div class="time-picker-popover" data-time-picker-dialog aria-labelledby="time-picker-title" role="dialog" hidden>
-      <h2 id="time-picker-title">Choose time</h2>
-      <div class="time-wheel-controls"><label>Hour<select data-picker-hour>{% for hour in range(1, 13) %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}</select></label><label>Minute<select data-picker-minute>{% for minute in range(0, 60, 5) %}<option value="{{ '%02d'|format(minute) }}">{{ '%02d'|format(minute) }}</option>{% endfor %}</select></label><label>Period<select data-picker-period><option>AM</option><option>PM</option></select></label></div>
-      <div class="button-row"><button class="button secondary" type="button" data-picker-cancel>Cancel</button><button class="button" type="button" data-picker-ok>OK</button></div>
-  </div>
-  <dialog class="app-dialog unsaved-dialog" data-unsaved-dialog aria-labelledby="unsaved-dialog-title">
-    <div class="dialog-heading"><div><p class="eyebrow">Unsaved Changes</p><h2 id="unsaved-dialog-title">You have changes that haven't been saved.</h2></div></div>
-    <p data-unsaved-message>These changes have not been saved.</p>
-    <div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div>
-  </dialog>
-  <script>
-    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
-  </script>
-  <script defer src="/_vercel/insights/script.js"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% if current_user.is_authenticated %}{% include 'partials/notification_drawer.html' %}{% endif %}
+  <div class="time-picker-popover" data-time-picker-dialog aria-labelledby="time-picker-title" role="dialog" hidden><h2 id="time-picker-title">Choose time</h2><div class="time-wheel-controls"><label>Hour<select data-picker-hour>{% for hour in range(1, 13) %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}</select></label><label>Minute<select data-picker-minute>{% for minute in range(0, 60, 5) %}<option value="{{ '%02d'|format(minute) }}">{{ '%02d'|format(minute) }}</option>{% endfor %}</select></label><label>Period<select data-picker-period><option>AM</option><option>PM</option></select></label></div><div class="button-row"><button class="button secondary" type="button" data-picker-cancel>Cancel</button><button class="button" type="button" data-picker-ok>OK</button></div></div>
+  <dialog class="app-dialog unsaved-dialog" data-unsaved-dialog aria-labelledby="unsaved-dialog-title"><div class="dialog-heading"><div><p class="eyebrow">Unsaved Changes</p><h2 id="unsaved-dialog-title">You have changes that haven't been saved.</h2></div></div><p data-unsaved-message>These changes have not been saved.</p><div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div></dialog>
+  <script>window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };</script><script defer src="/_vercel/insights/script.js"></script><script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

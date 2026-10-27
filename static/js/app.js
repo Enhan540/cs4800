@@ -1,4 +1,11 @@
+const NOTIFICATION_POLL_INTERVAL_MS = 45 * 1000;
+
 document.addEventListener("DOMContentLoaded", () => {
+  const sidebar = document.querySelector("[data-app-sidebar]");
+  const closeSidebar = () => document.body.classList.remove("sidebar-open");
+  document.querySelectorAll("[data-sidebar-open]").forEach((button) => button.addEventListener("click", () => document.body.classList.add("sidebar-open")));
+  document.querySelectorAll("[data-sidebar-close]").forEach((button) => button.addEventListener("click", closeSidebar));
+  sidebar?.addEventListener("keydown", (event) => { if (event.key === "Escape") closeSidebar(); });
   document.querySelectorAll("[data-group-availability]").forEach((groupView) => {
     const memberButtons = Array.from(groupView.querySelectorAll("[data-member-select]"));
     const overlays = Array.from(groupView.querySelectorAll("[data-member-overlay]"));
@@ -32,6 +39,148 @@ document.addEventListener("DOMContentLoaded", () => {
       if (event.key === "Escape") { menu.open = false; menu.querySelector("summary")?.focus(); }
     });
   });
+  document.querySelectorAll("[data-notification-menu]").forEach((menu) => {
+    const summary = menu.querySelector("summary");
+    const list = menu.querySelector(".notification-list");
+    const heading = menu.querySelector(".notification-heading");
+    const refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.className = "icon-button notification-refresh";
+    refreshButton.setAttribute("aria-label", "Refresh notifications");
+    refreshButton.textContent = "↻";
+    heading?.appendChild(refreshButton);
+    let refreshing = false;
+    const setBellState = (count) => {
+      const existing = menu.querySelector(".notification-unread-dot");
+      if (count && !existing) {
+        const dot = document.createElement("i");
+        dot.className = "notification-unread-dot";
+        dot.setAttribute("aria-label", "Unread notifications");
+        summary.appendChild(dot);
+      } else if (!count) existing?.remove();
+    };
+    const renderNotifications = (items) => {
+      if (!list) return;
+      list.replaceChildren();
+      if (!items.length) {
+        const empty = document.createElement("p");
+        empty.className = "notification-empty";
+        empty.textContent = "You're all caught up.";
+        list.appendChild(empty);
+        return;
+      }
+      items.forEach((item) => {
+        const card = document.createElement("article");
+        card.className = `notification-item${item.read ? " is-read" : ""}`;
+        const title = document.createElement("strong");
+        const text = document.createElement("p");
+        const actions = document.createElement("div");
+        actions.className = "notification-actions";
+        if (item.type === "GROUP_INVITE") {
+          title.textContent = item.group_name;
+          text.textContent = `${item.actor_name} invited you to join this group.`;
+          [["Decline", "secondary", `/invitations/${item.invite_id}/decline`], ["Accept", "", `/invitations/${item.invite_id}/accept`]].forEach(([label, style, action]) => {
+            const form = document.createElement("form"); form.method = "post"; form.action = action;
+            const button = document.createElement("button"); button.type = "submit"; button.className = `button ${style}`.trim(); button.textContent = label;
+            form.appendChild(button); actions.appendChild(form);
+          });
+        } else if (item.type === "PLAN_SCHEDULED") {
+          const link = document.createElement("a"); link.className = "notification-link"; link.href = `/plans/${item.plan_id}`;
+          title.textContent = item.plan_title; link.appendChild(title);
+          text.textContent = "The plan has been scheduled."; link.appendChild(text);
+          const times = document.createElement("small"); times.textContent = `${item.scheduled_start.replace("T", " ")} – ${item.scheduled_end.replace("T", " ")}`; link.appendChild(times);
+          card.appendChild(link);
+          [["Not Going", "secondary", "not_attending"], ["Attending", "", "attending"]].forEach(([label, style, status]) => {
+            const form = document.createElement("form"); form.method = "post"; form.action = `/notifications/${item.id}/rsvp`;
+            const input = document.createElement("input"); input.type = "hidden"; input.name = "status"; input.value = status;
+            const button = document.createElement("button"); button.type = "submit"; button.className = `button ${style}`.trim(); button.textContent = label;
+            form.append(input, button); actions.appendChild(form);
+          });
+        }
+        if (item.type === "GROUP_INVITE") card.append(title, text);
+        card.appendChild(actions); list.appendChild(card);
+      });
+    };
+    const refreshNotifications = async () => {
+      if (refreshing) return;
+      refreshing = true; refreshButton.disabled = true; refreshButton.classList.add("is-loading");
+      try {
+        const response = await fetch("/api/notifications", { headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error("notification refresh failed");
+        const payload = await response.json(); renderNotifications(payload.notifications); setBellState(payload.unread_count);
+      } catch (_error) {
+        let status = menu.querySelector("[data-notification-refresh-status]");
+        if (!status) { status = document.createElement("p"); status.className = "notification-refresh-status"; heading?.after(status); }
+        status.textContent = "Couldn't refresh notifications.";
+      } finally { refreshing = false; refreshButton.disabled = false; refreshButton.classList.remove("is-loading"); }
+    };
+    refreshButton.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); refreshNotifications(); });
+    menu.addEventListener("toggle", () => {
+      if (!menu.open) return;
+      refreshNotifications().then(() => fetch("/notifications/read", { method: "POST", headers: { "X-Requested-With": "fetch" } }).then(() => setBellState(0)).catch(() => {}));
+    });
+    document.addEventListener("click", (event) => {
+      if (!menu.contains(event.target)) menu.open = false;
+    });
+    menu.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { menu.open = false; summary?.focus(); }
+    });
+    const pollNotifications = async () => {
+      if (document.hidden) return;
+      try {
+        const response = await fetch("/api/notifications/summary", { headers: { Accept: "application/json" } });
+        if (response.ok) setBellState((await response.json()).unread_count);
+      } catch (_error) { /* A transient poll failure leaves the current UI intact. */ }
+    };
+    window.setInterval(pollNotifications, NOTIFICATION_POLL_INTERVAL_MS);
+  });
+  const drawer = document.querySelector("[data-notification-drawer]");
+  if (drawer) {
+    const backdrop = document.querySelector("[data-notification-close]");
+    const list = drawer.querySelector("[data-notification-list]");
+    const refresh = drawer.querySelector("[data-notification-refresh]");
+    const setUnread = (count) => {
+      document.querySelectorAll(".sidebar-unread-count").forEach((badge) => {
+        badge.textContent = count || ""; badge.hidden = !count;
+      });
+    };
+    const renderDrawer = (items) => {
+      list.replaceChildren();
+      if (!items.length) { const empty = document.createElement("p"); empty.className = "notification-empty"; empty.textContent = "You're all caught up."; list.appendChild(empty); return; }
+      items.forEach((item) => {
+        const card = document.createElement("article"); card.className = "notification-item";
+        if (item.type === "GROUP_INVITE") {
+          const title = document.createElement("strong"); title.textContent = item.group_name;
+          const text = document.createElement("p"); text.textContent = `${item.actor_name} invited you to join this group.`;
+          card.append(title, text);
+          const actions = document.createElement("div"); actions.className = "notification-actions";
+          [["Decline", "secondary", `/invitations/${item.invite_id}/decline`], ["Join Group", "", `/invitations/${item.invite_id}/accept`]].forEach(([label, style, action]) => { const form = document.createElement("form"); form.method = "post"; form.action = action; const button = document.createElement("button"); button.className = `button ${style}`.trim(); button.type = "submit"; button.textContent = label; form.appendChild(button); actions.appendChild(form); });
+          card.appendChild(actions);
+        } else if (item.type === "PLAN_SCHEDULED") {
+          const link = document.createElement("a"); link.className = "notification-link"; link.href = `/plans/${item.plan_id}`;
+          const title = document.createElement("strong"); title.textContent = item.plan_title; const text = document.createElement("p"); text.textContent = "The plan has been scheduled."; const time = document.createElement("small"); time.textContent = `${item.scheduled_start.replace("T", " ")} – ${item.scheduled_end.replace("T", " ")}`; link.append(title, text, time); card.appendChild(link);
+          const actions = document.createElement("div"); actions.className = "notification-actions";
+          [["Not Going", "secondary", "not_attending"], ["Attending", "", "attending"]].forEach(([label, style, status]) => { const form = document.createElement("form"); form.method = "post"; form.action = `/notifications/${item.id}/rsvp`; const input = document.createElement("input"); input.type = "hidden"; input.name = "status"; input.value = status; const button = document.createElement("button"); button.className = `button ${style}`.trim(); button.type = "submit"; button.textContent = label; form.append(input, button); actions.appendChild(form); });
+          card.appendChild(actions);
+        }
+        list.appendChild(card);
+      });
+    };
+    let drawerRefreshing = false;
+    const refreshDrawer = async () => {
+      if (drawerRefreshing) return;
+      drawerRefreshing = true; refresh.disabled = true; refresh.classList.add("is-loading");
+      try { const response = await fetch("/api/notifications", { headers: { Accept: "application/json" } }); if (!response.ok) throw new Error(); const payload = await response.json(); renderDrawer(payload.notifications); setUnread(payload.unread_count); }
+      catch (_error) { let status = drawer.querySelector("[data-notification-refresh-status]"); if (!status) { status = document.createElement("p"); status.className = "notification-refresh-status"; status.textContent = "Couldn't refresh notifications."; drawer.querySelector(".notification-drawer-actions")?.after(status); } }
+      finally { drawerRefreshing = false; refresh.disabled = false; refresh.classList.remove("is-loading"); }
+    };
+    const closeDrawer = () => { drawer.hidden = true; drawer.setAttribute("aria-hidden", "true"); if (backdrop) backdrop.hidden = true; document.body.classList.remove("notification-drawer-open"); };
+    document.querySelectorAll("[data-notification-open]").forEach((button) => button.addEventListener("click", () => { drawer.hidden = false; drawer.setAttribute("aria-hidden", "false"); if (backdrop) backdrop.hidden = false; document.body.classList.add("notification-drawer-open"); refreshDrawer().then(() => fetch("/notifications/read", { method: "POST" }).then(() => setUnread(0)).catch(() => {})); }));
+    document.querySelectorAll("[data-notification-close]").forEach((button) => button.addEventListener("click", closeDrawer));
+    refresh?.addEventListener("click", refreshDrawer);
+    drawer.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawer(); });
+    window.setInterval(async () => { if (document.hidden) return; try { const response = await fetch("/api/notifications/summary", { headers: { Accept: "application/json" } }); if (response.ok) setUnread((await response.json()).unread_count); } catch (_error) {} }, NOTIFICATION_POLL_INTERVAL_MS);
+  }
 
   document.querySelectorAll("[data-card-href]").forEach((card) => {
     const navigate = () => { window.location.href = card.dataset.cardHref; };
@@ -108,13 +257,16 @@ document.addEventListener("DOMContentLoaded", () => {
           const response = await fetch(`${input.dataset.inviteSearch}?q=${encodeURIComponent(query)}`, { headers: { Accept: "application/json" } });
           const payload = await response.json();
           results.innerHTML = payload.results.length ? payload.results.map((item) => {
-            const label = item.state === "member" ? "Already a member" : item.state === "pending" ? "Already invited" : "Invite";
-            const action = item.state === "available" ? `<button type="button" data-invite-username="${item.username}">${label}</button>` : `<span class="muted small">${label}</span>`;
+            const label = item.state === "member" ? "Member ✓" : item.state === "pending" ? "Invited ✓" : "Invite";
+            const action = item.state === "available" ? `<button type="button" data-invite-id="${item.id}" data-invite-username="${item.username}">${label}</button>` : `<span class="muted small">${label}</span>`;
             return `<div class="invite-search-result"><span>${item.username}</span>${action}</div>`;
           }).join("") : '<p class="muted small">No matching accounts.</p>';
           results.querySelectorAll("[data-invite-username]").forEach((button) => button.addEventListener("click", () => {
-            input.value = button.dataset.inviteUsername;
-            results.innerHTML = `<p class="muted small">Selected ${button.dataset.inviteUsername}. Send the invitation to continue.</p>`;
+            button.disabled = true;
+            button.textContent = "Inviting…";
+            fetch(input.closest("form").action, { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest", Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ username: button.dataset.inviteUsername }) })
+              .then(async (inviteResponse) => { const data = await inviteResponse.json(); if (!inviteResponse.ok || !data.ok) throw new Error(data.error || "Invitation failed"); button.textContent = "Invited ✓"; button.classList.add("is-invited"); })
+              .catch((error) => { button.disabled = false; button.textContent = "Retry / Invite"; const message = document.createElement("small"); message.className = "invite-error"; message.textContent = error.message; button.closest(".invite-search-result")?.appendChild(message); });
           }));
         } catch (_error) {
           results.innerHTML = '<p class="muted small">Search is temporarily unavailable.</p>';

@@ -3,7 +3,7 @@ import os
 import mongomock
 import pytest
 from flask import jsonify
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 os.environ["MONGO_URI"] = ""
 from app import create_app
@@ -379,3 +379,55 @@ def test_google_email_collision_is_not_automatically_merged(auth_app_and_db):
 
     assert b"already connected to another account" in response.data
     assert database.accounts.count_documents({"google_email": "same@example.com"}) == 1
+
+
+def test_verified_google_email_requires_password_proof_before_linking(auth_app_and_db):
+    app, database = auth_app_and_db
+    account_id = database.accounts.insert_one({
+        "username": "existing-user",
+        "normalized_username": "existing-user",
+        "email": "existing@example.com",
+        "password_hash": generate_password_hash("correct-horse"),
+        "auth_methods": ["password"],
+        "groups": ["must-remain-attached"],
+    }).inserted_id
+    configured_google_client(app, profile={
+        "sub": "new-google-subject",
+        "email": "existing@example.com",
+        "email_verified": True,
+        "name": "Existing User",
+    })
+    client = app.test_client()
+    _response, state = start_google_login(client)
+    callback = client.get(f"/auth/google/callback?state={state}")
+
+    assert callback.headers["Location"].endswith("/login?link_google=1")
+    assert database.accounts.count_documents({}) == 1
+    assert database.accounts.find_one({"_id": account_id}).get("google_sub") is None
+
+    wrong = client.post("/login", data={"username": "existing-user", "password": "wrong"})
+    assert wrong.status_code == 401
+    assert database.accounts.find_one({"_id": account_id}).get("google_sub") is None
+
+    linked = client.post(
+        "/login", data={"username": "existing-user", "password": "correct-horse"}
+    )
+    assert linked.status_code == 302
+    updated = database.accounts.find_one({"_id": account_id})
+    assert updated["google_sub"] == "new-google-subject"
+    assert updated["groups"] == ["must-remain-attached"]
+    assert updated["auth_methods"] == ["password", "google"]
+
+
+def test_google_only_account_cannot_disconnect_its_only_login_method(auth_app_and_db):
+    app, database = auth_app_and_db
+    client = app.test_client()
+    configured_google_client(app)
+    _response, state = start_google_login(client)
+    client.get(f"/auth/google/callback?state={state}")
+
+    account = database.accounts.find_one({"google_sub": "google-user-123"})
+    response = client.post("/account/google/disconnect", follow_redirects=True)
+
+    assert b"Set a password before disconnecting" in response.data
+    assert database.accounts.find_one({"_id": account["_id"]})["google_sub"] == "google-user-123"

@@ -28,6 +28,15 @@ from services.availability_service import (
     group_availability_blocks,
 )
 from services.conflict_service import effective_plan_interval, intervals_overlap
+from services.notification_service import (
+    GROUP_INVITE,
+    PLAN_SCHEDULED,
+    create_notification,
+    get_user_notifications,
+    mark_read,
+    resolve_notification,
+    unread_count,
+)
 from services.scheduling_service import DAYS, find_matching_times, parse_date, parse_time
 
 load_dotenv()
@@ -40,6 +49,10 @@ ADMIN_PERMISSIONS = {
     "edit_member_availability",
     "edit_member_rsvp",
     "manage_plans",
+}
+CALENDAR_FRESHNESS_SECONDS = {
+    "view": 5 * 60,
+    "scheduling": 60,
 }
 
 
@@ -118,6 +131,10 @@ def create_app(database_override=None):
             database.accounts.create_index("normalized_username", unique=True)
             database.accounts.create_index("google_sub", unique=True, sparse=True)
             database.accounts.create_index("google_email", unique=True, sparse=True)
+            database.google_oauth_states.create_index("state_hash", unique=True)
+            database.google_oauth_states.create_index("expires_at", expireAfterSeconds=0)
+            database.google_link_states.create_index("token_hash", unique=True)
+            database.google_link_states.create_index("expires_at", expireAfterSeconds=0)
             database.calendar_connections.create_index(
                 [("account_id", ASCENDING), ("provider", ASCENDING)], unique=True
             )
@@ -131,6 +148,9 @@ def create_app(database_override=None):
                 unique=True,
                 partialFilterExpression={"status": "pending"},
             )
+            database.notifications.create_index(
+                [("recipient_user_id", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)]
+            )
         except PyMongoError:
             app.logger.exception("Unable to create MongoDB indexes during startup")
 
@@ -139,6 +159,24 @@ def create_app(database_override=None):
     login_manager.login_message = "Please log in to continue."
     login_manager.login_message_category = "error"
     login_manager.init_app(app)
+
+    @app.context_processor
+    def notification_context():
+        if not current_user.is_authenticated or database is None:
+            return {"notifications": [], "notification_unread_count": 0, "sidebar_groups": []}
+        try:
+            notifications = get_user_notifications(database, current_account_id())
+            sidebar_groups = list(database.groups.find(
+                account_filter("account_ids")
+            ).sort("created_at", DESCENDING).limit(6))
+            return {
+                "notifications": notifications,
+                "notification_unread_count": unread_count(database, current_account_id()),
+                "sidebar_groups": sidebar_groups,
+            }
+        except PyMongoError:
+            app.logger.exception("Unable to load notifications")
+            return {"notifications": [], "notification_unread_count": 0, "sidebar_groups": []}
 
     oauth = OAuth(app)
     google = oauth.register(
@@ -516,6 +554,7 @@ def create_app(database_override=None):
         return values, errors
 
     def calculate_matches(group, values, exclude_plan_id=None):
+        ensure_group_calendars_fresh(group, "scheduling")
         member_ids = group.get("member_ids", [])
         availability_records = list(
             require_database().availability.find({"user_id": {"$in": member_ids}})
@@ -1003,8 +1042,61 @@ def create_app(database_override=None):
             )
             return False
 
+    def ensure_calendar_fresh(account_id, mode="view", force=False):
+        """Refresh an account calendar only when its cached data is stale."""
+        if not account_id:
+            return True
+        db = require_database()
+        connection = db.calendar_connections.find_one({
+            "account_id": account_id,
+            "provider": {"$in": ["ical", "google"]},
+        })
+        if not connection:
+            return True
+        threshold = timedelta(seconds=CALENDAR_FRESHNESS_SECONDS.get(
+            mode, CALENDAR_FRESHNESS_SECONDS["view"]
+        ))
+        last_synced = as_datetime(connection.get("last_synced_at"))
+        if (
+            not force
+            and last_synced
+            and utc_now() - last_synced <= threshold
+            and connection.get("sync_status") == "connected"
+        ):
+            return True
+
+        # A MongoDB lease avoids duplicate fetches across serverless instances.
+        lease = db.calendar_connections.update_one(
+            {"_id": connection["_id"], "sync_in_progress": {"$ne": True}},
+            {"$set": {"sync_in_progress": True, "sync_started_at": utc_now()}},
+        )
+        if not lease.modified_count:
+            return False
+        try:
+            return sync_calendar_connection(connection)
+        finally:
+            db.calendar_connections.update_one(
+                {"_id": connection["_id"]},
+                {"$unset": {"sync_in_progress": "", "sync_started_at": ""}},
+            )
+
+    def ensure_group_calendars_fresh(group, mode="view"):
+        db = require_database()
+        failures = []
+        for member in db.users.find(
+            {"_id": {"$in": group.get("member_ids", [])}},
+            {"linked_account_id": 1, "account_id": 1},
+        ):
+            account_id = member.get("linked_account_id") or member.get("account_id")
+            if account_id and not ensure_calendar_fresh(account_id, mode):
+                failures.append(account_id)
+        return failures
+
     def available_google_username(profile, db):
-        raw_name = profile.get("name") or str(profile.get("email", "")).split("@", 1)[0]
+        # Use the email local-part as a starting suggestion.  The provider's
+        # display name is not an identity and must not silently become a
+        # Group Planner username.
+        raw_name = str(profile.get("email", "")).split("@", 1)[0]
         base = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_name).strip("-_")[:40]
         if not base or not base[0].isalnum():
             base = "user"
@@ -1017,6 +1109,134 @@ def create_app(database_override=None):
             candidate = f"{base[:40 - len(suffix_text)]}{suffix_text}"
             suffix += 1
         return candidate
+
+    def google_claims(profile):
+        """Return the minimal validated Google identity used by this app."""
+        if not isinstance(profile, dict):
+            return None
+        issuer = profile.get("iss")
+        if issuer and issuer not in {"https://accounts.google.com", "accounts.google.com"}:
+            return None
+        subject = str(profile.get("sub", "")).strip()
+        email = str(profile.get("email", "")).strip().casefold()
+        if not subject or not email or profile.get("email_verified") is not True:
+            return None
+        return {
+            "sub": subject,
+            "email": email,
+            "email_verified": True,
+            "name": str(profile.get("name", "")).strip(),
+        }
+
+    def google_claims_match_client(profile):
+        audience = profile.get("aud") if isinstance(profile, dict) else None
+        if audience and app.config["GOOGLE_CLIENT_ID"]:
+            audiences = audience if isinstance(audience, list) else [audience]
+            if app.config["GOOGLE_CLIENT_ID"] not in audiences:
+                return False
+        return True
+
+    def google_state(flow, account_id=None):
+        state = secrets.token_urlsafe(32)
+        require_database().google_oauth_states.insert_one({
+            "state_hash": hashlib.sha256(state.encode()).hexdigest(),
+            "flow": flow,
+            "account_id": account_id,
+            "created_at": utc_now(),
+            "expires_at": utc_now() + timedelta(minutes=10),
+        })
+        session["google_oauth_state"] = state
+        return state
+
+    def pop_google_state(state):
+        if not state:
+            return None
+        db = require_database()
+        state_hash = hashlib.sha256(state.encode()).hexdigest()
+        record = db.google_oauth_states.find_one({"state_hash": state_hash})
+        db.google_oauth_states.delete_one({"state_hash": state_hash})
+        expires_at = record.get("expires_at") if record else None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if not record or (expires_at and expires_at < utc_now()):
+            return None
+        return record
+
+    def account_email_conflict(db, claims, exclude_id=None):
+        query = {"$or": [
+            {"google_sub": claims["sub"]},
+            {"google_email": claims["email"]},
+            {"email": claims["email"]},
+            {"normalized_email": claims["email"]},
+        ]}
+        if exclude_id is not None:
+            query = {"$and": [query, {"_id": {"$ne": exclude_id}}]}
+        return db.accounts.find_one(query)
+
+    def link_google_identity(db, account_id, claims):
+        conflict = account_email_conflict(db, claims, exclude_id=account_id)
+        if conflict:
+            return False
+        account = db.accounts.find_one({"_id": account_id})
+        if not account:
+            return False
+        existing_sub = account.get("google_sub")
+        if existing_sub and existing_sub != claims["sub"]:
+            return False
+        result = db.accounts.update_one(
+            {"_id": account_id, "$or": [
+                {"google_sub": {"$exists": False}},
+                {"google_sub": None},
+                {"google_sub": claims["sub"]},
+            ]},
+            {"$set": {
+                "google_sub": claims["sub"],
+                "google_email": claims["email"],
+                "google_email_verified": True,
+                "updated_at": utc_now(),
+            }, "$addToSet": {"auth_methods": "google"}},
+        )
+        return result.modified_count == 1 or existing_sub == claims["sub"]
+
+    def create_pending_google_link(db, claims, account_id):
+        token = secrets.token_urlsafe(32)
+        db.google_link_states.insert_one({
+            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+            "account_id": account_id,
+            "claims": claims,
+            "created_at": utc_now(),
+            "expires_at": utc_now() + timedelta(minutes=10),
+        })
+        session["pending_google_link_token"] = token
+
+    def pending_google_link(db):
+        token = session.get("pending_google_link_token")
+        if not token:
+            return None
+        record = db.google_link_states.find_one({
+            "token_hash": hashlib.sha256(token.encode()).hexdigest()
+        })
+        expires_at = record.get("expires_at") if record else None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if not record or (expires_at and expires_at < utc_now()):
+            session.pop("pending_google_link_token", None)
+            if record:
+                db.google_link_states.delete_one({"_id": record["_id"]})
+            return None
+        return record
+
+    def finish_pending_google_link(db, account):
+        record = pending_google_link(db)
+        if not record:
+            return False
+        if record["account_id"] != account["_id"]:
+            return None
+        linked = link_google_identity(db, account["_id"], record["claims"])
+        if linked:
+            db.google_link_states.delete_one({"_id": record["_id"]})
+            session.pop("pending_google_link_token", None)
+        return linked
 
     @app.route("/register", methods=["GET", "POST"])
     def register():
@@ -1070,20 +1290,40 @@ def create_app(database_override=None):
         if current_user.is_authenticated:
             return redirect(url_for("dashboard"))
         next_url = safe_next_url(request.values.get("next"))
+        db = require_database()
         if request.method == "POST":
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
-            account = require_database().accounts.find_one(
+            account = db.accounts.find_one(
                 {"normalized_username": username.casefold()}
             )
             if not account or not account.get("password_hash") or not check_password_hash(
                 account["password_hash"], password
             ):
                 flash("Invalid username or password.", "error")
-                return render_template("login.html", username=username, next_url=next_url), 401
+                return render_template(
+                    "login.html", username=username, next_url=next_url,
+                    pending_google_link=bool(pending_google_link(db)),
+                ), 401
+            link_result = finish_pending_google_link(db, account)
+            if link_result is None:
+                flash("Sign in with the account that owns the matching email to connect Google.", "error")
+                return render_template(
+                    "login.html", username=username, next_url=next_url,
+                    pending_google_link=True,
+                ), 403
+            if link_result is False and session.get("pending_google_link_token"):
+                flash("Google could not be connected to this account. Please try again.", "error")
+                return render_template(
+                    "login.html", username=username, next_url=next_url,
+                    pending_google_link=True,
+                ), 400
             login_user(Account(account))
             return redirect(next_url or url_for("dashboard"))
-        return render_template("login.html", username="", next_url=next_url)
+        return render_template(
+            "login.html", username="", next_url=next_url,
+            pending_google_link=bool(pending_google_link(db)),
+        )
 
     @app.post("/logout")
     @login_required
@@ -1101,8 +1341,7 @@ def create_app(database_override=None):
         if not app.config["GOOGLE_CLIENT_ID"] or not app.config["GOOGLE_CLIENT_SECRET"]:
             flash("Google sign-in is not configured for this deployment.", "error")
             return redirect(url_for("login"))
-        state = secrets.token_urlsafe(32)
-        session["google_oauth_state"] = state
+        state = google_state("login")
         redirect_uri = app.config["GOOGLE_REDIRECT_URI"] or url_for(
             "google_callback", _external=True
         )
@@ -1112,8 +1351,6 @@ def create_app(database_override=None):
 
     @app.get("/auth/google/callback")
     def google_callback():
-        if current_user.is_authenticated:
-            return redirect(url_for("dashboard"))
         expected_state = session.pop("google_oauth_state", None)
         received_state = request.args.get("state", "")
         if (
@@ -1123,6 +1360,10 @@ def create_app(database_override=None):
         ):
             flash("Google sign-in could not be verified. Please try again.", "error")
             return redirect(url_for("login"))
+        state_record = pop_google_state(expected_state)
+        if not state_record:
+            flash("Google sign-in has expired. Please try again.", "error")
+            return redirect(url_for("account" if current_user.is_authenticated else "login"))
         if request.args.get("error"):
             flash("Google sign-in was cancelled or denied.", "error")
             return redirect(url_for("login"))
@@ -1136,41 +1377,80 @@ def create_app(database_override=None):
             flash("Google sign-in failed. Please try again.", "error")
             return redirect(url_for("login"))
 
-        google_sub = str(profile.get("sub", "")).strip()
-        google_email = str(profile.get("email", "")).strip().casefold()
-        if not google_sub or not google_email or profile.get("email_verified") is not True:
+        claims = google_claims(profile)
+        if not claims or not google_claims_match_client(profile):
             flash("Google did not provide a verified email address.", "error")
-            return redirect(url_for("login"))
+            return redirect(url_for("account" if current_user.is_authenticated else "login"))
 
         db = require_database()
-        account_document = db.accounts.find_one({"google_sub": google_sub})
-        if not account_document:
-            email_owner = db.accounts.find_one({"google_email": google_email})
-            if email_owner:
-                flash(
-                    "That Google email is already connected to another account.", "error"
-                )
+        flow = state_record.get("flow")
+        if flow == "connect":
+            if not current_user.is_authenticated or str(current_account_id()) != str(state_record.get("account_id")):
+                flash("Please remain signed in while connecting Google.", "error")
                 return redirect(url_for("login"))
-            now = utc_now()
-            username = available_google_username(profile, db)
-            account_document = {
-                "username": username,
-                "normalized_username": username.casefold(),
-                "google_sub": google_sub,
-                "google_email": google_email,
-                "auth_methods": ["google"],
-                "must_change_password": False,
-                "created_at": now,
-                "updated_at": now,
-            }
-            try:
-                result = db.accounts.insert_one(account_document)
-            except DuplicateKeyError:
-                flash("That Google identity is already connected.", "error")
+            if account_email_conflict(db, claims, exclude_id=current_account_id()):
+                flash("That Google identity is already linked to another account.", "error")
+                return redirect(url_for("account"))
+            if not link_google_identity(db, current_account_id(), claims):
+                flash("Google could not be connected to this account.", "error")
+                return redirect(url_for("account"))
+            flash("Google connected to your Group Planner account.", "success")
+            return redirect(url_for("account"))
+
+        account_document = db.accounts.find_one({"google_sub": claims["sub"]})
+        if account_document:
+            login_user(Account(account_document))
+            return redirect(url_for("dashboard"))
+
+        email_owner = account_email_conflict(db, claims)
+        if email_owner:
+            if email_owner.get("google_sub"):
+                flash("That Google email is already connected to another account.", "error")
                 return redirect(url_for("login"))
-            account_document["_id"] = result.inserted_id
+            create_pending_google_link(db, claims, email_owner["_id"])
+            flash("A Group Planner account already uses this email. Sign in to connect Google.", "error")
+            return redirect(url_for("login", link_google="1"))
+
+        if current_user.is_authenticated:
+            flash("Google could not be connected to this account.", "error")
+            return redirect(url_for("account"))
+        now = utc_now()
+        username = available_google_username(profile, db)
+        account_document = {
+            "username": username,
+            "normalized_username": username.casefold(),
+            "google_sub": claims["sub"],
+            "google_email": claims["email"],
+            "google_email_verified": True,
+            "email": claims["email"],
+            "email_verified": True,
+            "auth_methods": ["google"],
+            "must_change_password": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            result = db.accounts.insert_one(account_document)
+        except DuplicateKeyError:
+            flash("That Google identity is already connected. Please try again.", "error")
+            return redirect(url_for("login"))
+        account_document["_id"] = result.inserted_id
         login_user(Account(account_document))
         return redirect(url_for("dashboard"))
+
+    @app.get("/auth/google/connect")
+    @login_required
+    def google_connect():
+        if not app.config["GOOGLE_CLIENT_ID"] or not app.config["GOOGLE_CLIENT_SECRET"]:
+            flash("Google sign-in is not configured for this deployment.", "error")
+            return redirect(url_for("account"))
+        state = google_state("connect", current_account_id())
+        redirect_uri = app.config["GOOGLE_REDIRECT_URI"] or url_for(
+            "google_callback", _external=True
+        )
+        return app.extensions["google_oauth_client"].authorize_redirect(
+            redirect_uri, state=state
+        )
 
     @app.get("/auth/google-calendar")
     @login_required
@@ -1307,6 +1587,28 @@ def create_app(database_override=None):
             account=document,
             connections=connections,
         )
+
+    @app.post("/account/google/disconnect")
+    @login_required
+    def disconnect_google_identity():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account or not account.get("google_sub"):
+            flash("Google is not connected to this account.", "error")
+            return redirect(url_for("account"))
+        if not account.get("password_hash"):
+            flash("Set a password before disconnecting your only sign-in method.", "error")
+            return redirect(url_for("account"))
+        db.accounts.update_one(
+            {"_id": account["_id"]},
+            {"$unset": {
+                "google_sub": "",
+                "google_email": "",
+                "google_email_verified": "",
+            }, "$pull": {"auth_methods": "google"}, "$set": {"updated_at": utc_now()}},
+        )
+        flash("Google was disconnected. Your password remains active.", "success")
+        return redirect(url_for("account"))
 
     @app.post("/account/password")
     @login_required
@@ -1584,6 +1886,19 @@ def create_app(database_override=None):
                 "display_name", ASCENDING
             )
         )
+        pending_invites = list(db.group_invites.find({
+            "group_id": group["_id"], "status": "pending"
+        }).sort("created_at", ASCENDING))
+        pending_account_ids = [invite["invited_user_id"] for invite in pending_invites]
+        pending_accounts = {
+            account["_id"]: account
+            for account in db.accounts.find({"_id": {"$in": pending_account_ids}})
+        }
+        pending_invitees = [
+            {"invite": invite, "account": pending_accounts.get(invite["invited_user_id"])}
+            for invite in pending_invites
+            if pending_accounts.get(invite["invited_user_id"])
+        ]
         members_by_id = {member["_id"]: member for member in members}
         entries = list(
             db.availability.find({"user_id": {"$in": member_ids}}).sort(
@@ -1715,6 +2030,7 @@ def create_app(database_override=None):
             upcoming_plan_count=len(scheduled_plans),
             can_manage_group=group_is_owner(group),
             can_invite=group_is_owner(group) or has_group_permission(group, "manage_members"),
+            pending_invitees=pending_invitees,
             can_assign_roles=group_is_owner(group),
             permissions={
                 permission: has_group_permission(group, permission)
@@ -1797,16 +2113,22 @@ def create_app(database_override=None):
         username = request.form.get("username", "").strip()
         account = db.accounts.find_one({"normalized_username": username.casefold()})
         if not account:
+            if wants_json_response():
+                return jsonify({"ok": False, "error": "No account was found for that username."}), 404
             flash("No account was found for that username.", "error")
             return redirect(url_for("group_detail", group_id=group_id))
         account_id = account["_id"]
+        response_state = "available"
         if account_id == current_account_id():
+            response_state = "member"
             flash("You are already in this group.", "error")
         elif account_id in group.get("account_ids", []):
+            response_state = "member"
             flash("This user is already a member of the group.", "error")
         elif db.group_invites.find_one(
             {"group_id": group["_id"], "invited_user_id": account_id, "status": "pending"}
         ):
+            response_state = "pending"
             flash("This user has already been invited.", "error")
         else:
             invite = {
@@ -1819,11 +2141,26 @@ def create_app(database_override=None):
                 "token": None,
             }
             try:
-                db.group_invites.insert_one(invite)
+                result = db.group_invites.insert_one(invite)
             except DuplicateKeyError:
                 flash("This user has already been invited.", "error")
             else:
+                response_state = "pending"
+                create_notification(
+                    db,
+                    account_id,
+                    GROUP_INVITE,
+                    group_id=group["_id"],
+                    invite_id=result.inserted_id,
+                    actor_user_id=current_account_id(),
+                    metadata={
+                        "group_name": group.get("name", "Group"),
+                        "actor_name": current_user.username,
+                    },
+                )
                 flash(f"Invitation sent to {account['username']}.", "success")
+        if wants_json_response():
+            return jsonify({"ok": response_state == "pending", "id": str(account_id), "username": account["username"], "state": response_state})
         return redirect(url_for("group_detail", group_id=group_id))
 
     def respond_to_group_invitation(invitation_id, status):
@@ -1853,6 +2190,13 @@ def create_app(database_override=None):
             {"_id": invite["_id"], "invited_user_id": current_account_id(), "status": "pending"},
             {"$set": {"status": status, "responded_at": utc_now()}},
         )
+        notification = db.notifications.find_one({
+            "invite_id": invite["_id"],
+            "recipient_user_id": current_account_id(),
+            "status": {"$ne": "resolved"},
+        })
+        if notification:
+            resolve_notification(db, notification["_id"], current_account_id())
         if result.modified_count != 1:
             flash("This invitation has already been answered.", "error")
         elif status == "accepted":
@@ -1870,6 +2214,122 @@ def create_app(database_override=None):
     @login_required
     def decline_group_invitation(invitation_id):
         return respond_to_group_invitation(invitation_id, "declined")
+
+    @app.post("/groups/<group_id>/invitations/<invitation_id>/retract")
+    @login_required
+    def retract_group_invitation(group_id, invitation_id):
+        db = require_database()
+        group = get_group(group_id)
+        require_group_permission(group, "manage_members")
+        invite = db.group_invites.find_one({
+            "_id": object_id(invitation_id), "group_id": group["_id"]
+        })
+        if not invite:
+            abort(404)
+        result = db.group_invites.update_one(
+            {"_id": invite["_id"], "group_id": group["_id"], "status": "pending"},
+            {"$set": {"status": "revoked", "responded_at": utc_now()}},
+        )
+        if result.modified_count:
+            notification = db.notifications.find_one({
+                "invite_id": invite["_id"],
+                "status": {"$ne": "resolved"},
+            })
+            if notification:
+                resolve_notification(db, notification["_id"], notification["recipient_user_id"])
+            flash("Invitation retracted.", "success")
+        else:
+            flash("That invitation is no longer pending.", "error")
+        return redirect(url_for("group_detail", group_id=group["_id"]))
+
+    @app.post("/notifications/read")
+    @login_required
+    def mark_notifications_read():
+        db = require_database()
+        db.notifications.update_many(
+            {"recipient_user_id": current_account_id(), "read_at": None},
+            {"$set": {"read_at": utc_now()}},
+        )
+        return jsonify({"ok": True, "unread_count": unread_count(db, current_account_id())})
+
+    def notification_payload(notification):
+        metadata = notification.get("metadata", {})
+        payload = {
+            "id": str(notification["_id"]),
+            "type": notification.get("type"),
+            "read": bool(notification.get("read_at")),
+            "status": notification.get("status", "unresolved"),
+            "created_at": notification.get("created_at").isoformat() if notification.get("created_at") else "",
+            "group_name": metadata.get("group_name", "Group invitation"),
+            "actor_name": metadata.get("actor_name", "Someone"),
+            "plan_title": metadata.get("plan_title", "Scheduled plan"),
+            "scheduled_start": metadata.get("scheduled_start", ""),
+            "scheduled_end": metadata.get("scheduled_end", ""),
+            "invite_id": str(notification["invite_id"]) if notification.get("invite_id") else None,
+            "plan_id": str(notification["plan_id"]) if notification.get("plan_id") else None,
+        }
+        return payload
+
+    @app.get("/api/notifications")
+    @login_required
+    def api_notifications():
+        db = require_database()
+        items = get_user_notifications(db, current_account_id())
+        return jsonify({
+            "notifications": [notification_payload(item) for item in items],
+            "unread_count": unread_count(db, current_account_id()),
+        })
+
+    @app.get("/api/notifications/summary")
+    @login_required
+    def api_notification_summary():
+        db = require_database()
+        latest = db.notifications.find_one(
+            {"recipient_user_id": current_account_id()},
+            sort=[("created_at", DESCENDING)],
+        )
+        return jsonify({
+            "unread_count": unread_count(db, current_account_id()),
+            "latest_created_at": latest.get("created_at").isoformat() if latest and latest.get("created_at") else None,
+        })
+
+    @app.post("/notifications/<notification_id>/rsvp")
+    @login_required
+    def notification_rsvp(notification_id):
+        db = require_database()
+        notification = db.notifications.find_one({
+            "_id": object_id(notification_id),
+            "recipient_user_id": current_account_id(),
+            "type": PLAN_SCHEDULED,
+            "status": {"$ne": "resolved"},
+        })
+        if not notification or not notification.get("plan_id"):
+            abort(404)
+        plan = get_plan(notification["plan_id"])
+        group = db.groups.find_one({"_id": plan["group_id"]})
+        member = db.users.find_one({
+            "$or": [
+                {"linked_account_id": current_account_id()},
+                {"account_id": current_account_id()},
+            ],
+            "_id": {"$in": plan_member_ids(plan, group)},
+        })
+        if not member:
+            abort(403)
+        status = request.form.get("status", "").strip()
+        if status not in {"attending", "not_attending"}:
+            abort(400)
+        response = {"status": status, "updated_at": utc_now()}
+        db.plans.update_one(
+            {"_id": plan["_id"]},
+            {"$set": {f"rsvps.{member['_id']}": response}},
+        )
+        resolve_notification(db, notification["_id"], current_account_id())
+        if status == "attending" and get_user_plan_conflicts(plan, member["_id"]):
+            flash("Your RSVP was saved, but it conflicts with another scheduled plan.", "error")
+        else:
+            flash("RSVP updated successfully.", "success")
+        return redirect(url_for("dashboard"))
 
     @app.post("/groups/<group_id>/members/<user_id>/role")
     @login_required
@@ -2258,6 +2718,7 @@ def create_app(database_override=None):
         if not group:
             abort(404)
         require_group_permission(group, "manage_plans")
+        ensure_group_calendars_fresh(group, "scheduling")
         try:
             match_index = int(request.form.get("match_index", ""))
             if match_index < 0:
@@ -2276,6 +2737,8 @@ def create_app(database_override=None):
             scheduled_end = datetime.fromisoformat(f"{match['date']}T{match['end_time']}")
         except (KeyError, ValueError):
             abort(404)
+
+        relevant_member_ids = plan_member_ids(plan, group)
 
         available_member_ids = []
         for member_id in match.get("available_member_ids", []):
@@ -2300,6 +2763,23 @@ def create_app(database_override=None):
                 "rsvps": {},
             }},
         )
+        for member_id in relevant_member_ids:
+            member = db.users.find_one({"_id": member_id}, {"linked_account_id": 1, "account_id": 1})
+            recipient_id = (member or {}).get("linked_account_id") or (member or {}).get("account_id")
+            if recipient_id:
+                create_notification(
+                    db,
+                    recipient_id,
+                    PLAN_SCHEDULED,
+                    group_id=group["_id"],
+                    plan_id=plan["_id"],
+                    actor_user_id=current_account_id(),
+                    metadata={
+                        "plan_title": plan.get("title", "Scheduled plan"),
+                        "scheduled_start": scheduled_start.isoformat(),
+                        "scheduled_end": scheduled_end.isoformat(),
+                    },
+                )
         date_text = scheduled_start.strftime("%A, %B %d").replace(" 0", " ")
         start_text = scheduled_start.strftime("%I:%M %p").lstrip("0")
         end_text = scheduled_end.strftime("%I:%M %p").lstrip("0")
