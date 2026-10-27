@@ -37,6 +37,7 @@ from services.notification_service import (
     resolve_notification,
     unread_count,
 )
+from services.email_service import send_password_reset_email, send_verification_email
 from services.scheduling_service import DAYS, find_matching_times, parse_date, parse_time
 
 load_dotenv()
@@ -96,6 +97,10 @@ def create_app(database_override=None):
         GOOGLE_REDIRECT_URI=os.getenv("GOOGLE_REDIRECT_URI", ""),
         GOOGLE_CALENDAR_REDIRECT_URI=os.getenv("GOOGLE_CALENDAR_REDIRECT_URI", ""),
         APP_TIMEZONE=timezone_name,
+        APP_BASE_URL=os.getenv("APP_BASE_URL", ""),
+        EMAIL_DELIVERY_MODE=os.getenv("EMAIL_DELIVERY_MODE", "console"),
+        RESEND_API_KEY=os.getenv("RESEND_API_KEY", ""),
+        FROM_EMAIL=os.getenv("FROM_EMAIL", ""),
     )
 
     mongo_uri = os.getenv("MONGO_URI")
@@ -131,6 +136,13 @@ def create_app(database_override=None):
             database.accounts.create_index("normalized_username", unique=True)
             database.accounts.create_index("google_sub", unique=True, sparse=True)
             database.accounts.create_index("google_email", unique=True, sparse=True)
+            database.accounts.create_index("normalized_email", unique=True, sparse=True)
+            database.accounts.create_index("email_normalized", unique=True, sparse=True)
+            database.account_tokens.create_index("token_hash", unique=True)
+            database.account_tokens.create_index("expires_at", expireAfterSeconds=0)
+            database.email_rate_limits.create_index(
+                [("key", ASCENDING)], unique=True
+            )
             database.google_oauth_states.create_index("state_hash", unique=True)
             database.google_oauth_states.create_index("expires_at", expireAfterSeconds=0)
             database.google_link_states.create_index("token_hash", unique=True)
@@ -982,10 +994,9 @@ def create_app(database_override=None):
                     headers={"Authorization": f"Bearer {token}"},
                     json={
                         "timeMin": now.isoformat(),
-                        # Google FreeBusy accepts at most a one-year window.
-                        # Use 365 days rather than 366 so this remains valid
-                        # across leap years and deployment dates.
-                        "timeMax": (now + timedelta(days=365)).isoformat(),
+                        # Google FreeBusy enforces a strict maximum range;
+                        # leave a one-day margin below one year.
+                        "timeMax": (now + timedelta(days=364)).isoformat(),
                         "timeZone": app.config["APP_TIMEZONE"],
                         "items": [{"id": "primary"}],
                     },
@@ -1016,7 +1027,7 @@ def create_app(database_override=None):
                         headers={"Authorization": f"Bearer {token}"},
                         json={
                             "timeMin": now.isoformat(),
-                            "timeMax": (now + timedelta(days=365)).isoformat(),
+                            "timeMax": (now + timedelta(days=364)).isoformat(),
                             "timeZone": app.config["APP_TIMEZONE"],
                             "items": [{"id": "primary"}],
                         },
@@ -1179,6 +1190,7 @@ def create_app(database_override=None):
             {"google_email": claims["email"]},
             {"email": claims["email"]},
             {"normalized_email": claims["email"]},
+            {"email_normalized": claims["email"]},
         ]}
         if exclude_id is not None:
             query = {"$and": [query, {"_id": {"$ne": exclude_id}}]}
@@ -1194,18 +1206,22 @@ def create_app(database_override=None):
         existing_sub = account.get("google_sub")
         if existing_sub and existing_sub != claims["sub"]:
             return False
+        account_email = normalize_email(account.get("email"))
+        verified_fields = {
+            "google_sub": claims["sub"],
+            "google_email": claims["email"],
+            "google_email_verified": True,
+            "updated_at": utc_now(),
+        }
+        if account_email == claims["email"]:
+            verified_fields.update({"email_verified": True, "email_verified_at": utc_now()})
         result = db.accounts.update_one(
             {"_id": account_id, "$or": [
                 {"google_sub": {"$exists": False}},
                 {"google_sub": None},
                 {"google_sub": claims["sub"]},
             ]},
-            {"$set": {
-                "google_sub": claims["sub"],
-                "google_email": claims["email"],
-                "google_email_verified": True,
-                "updated_at": utc_now(),
-            }, "$addToSet": {"auth_methods": "google"}},
+            {"$set": verified_fields, "$addToSet": {"auth_methods": "google"}},
         )
         return result.modified_count == 1 or existing_sub == claims["sub"]
 
@@ -1249,12 +1265,68 @@ def create_app(database_override=None):
             session.pop("pending_google_link_token", None)
         return linked
 
+    def normalize_email(value):
+        return str(value or "").strip().casefold()
+
+    def valid_email(value):
+        return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value or ""))
+
+    def issue_account_token(db, user_id, purpose, email):
+        token = secrets.token_urlsafe(32)
+        db.account_tokens.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "purpose": purpose,
+            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+            "created_at": utc_now(),
+            "expires_at": utc_now() + timedelta(hours=24 if purpose == "verify_email" else 1),
+        })
+        return token
+
+    def consume_account_token(db, token, purpose):
+        token_hash = hashlib.sha256(str(token).encode()).hexdigest()
+        record = db.account_tokens.find_one({"token_hash": token_hash, "purpose": purpose})
+        if not record:
+            return None
+        expires_at = record.get("expires_at")
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at and expires_at < utc_now():
+            db.account_tokens.delete_one({"_id": record["_id"]})
+            return None
+        return record
+
+    def email_rate_limited(db, key, seconds=60):
+        now = utc_now()
+        record = db.email_rate_limits.find_one({"key": key})
+        if record:
+            last_sent = record.get("last_sent_at")
+            if last_sent and last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            if last_sent and now - last_sent < timedelta(seconds=seconds):
+                return True
+        db.email_rate_limits.update_one(
+            {"key": key},
+            {"$set": {"last_sent_at": now}},
+            upsert=True,
+        )
+        return False
+
+    def send_verification_for_account(db, account):
+        email = normalize_email(account.get("email") or account.get("google_email"))
+        if not email or account.get("email_verified") is True or email_rate_limited(db, f"verify:{account['_id']}"):
+            return False
+        db.account_tokens.delete_many({"user_id": account["_id"], "purpose": "verify_email"})
+        token = issue_account_token(db, account["_id"], "verify_email", email)
+        return send_verification_email(app, recipient=email, token=token)
+
     @app.route("/register", methods=["GET", "POST"])
     def register():
         if current_user.is_authenticated:
             return redirect(url_for("dashboard"))
         if request.method == "POST":
             username = request.form.get("username", "").strip()
+            email = normalize_email(request.form.get("email"))
             password = request.form.get("password", "")
             confirmation = request.form.get("confirm_password", "")
             errors = []
@@ -1264,6 +1336,8 @@ def create_app(database_override=None):
                 errors.append(
                     "Username must be 3–40 characters and use only letters, numbers, underscores, or hyphens."
                 )
+            if email and not valid_email(email):
+                errors.append("Enter a valid email address.")
             if len(password) < 8:
                 errors.append("Password must be at least 8 characters.")
             if password != confirmation:
@@ -1271,10 +1345,12 @@ def create_app(database_override=None):
             db = require_database()
             if not errors and db.accounts.find_one({"normalized_username": username.casefold()}):
                 errors.append("Username is already taken.")
+            if not errors and email and db.accounts.find_one({"$or": [{"normalized_email": email}, {"email_normalized": email}]}):
+                errors.append("That email is already in use.")
             if errors:
                 for error in errors:
                     flash(error, "error")
-                return render_template("register.html", username=username), 400
+                return render_template("register.html", username=username, email=email), 400
             now = utc_now()
             document = {
                 "username": username,
@@ -1285,6 +1361,8 @@ def create_app(database_override=None):
                 "created_at": now,
                 "updated_at": now,
             }
+            if email:
+                document.update({"email": email, "normalized_email": email, "email_normalized": email, "email_verified": False})
             try:
                 result = db.accounts.insert_one(document)
             except DuplicateKeyError:
@@ -1292,9 +1370,11 @@ def create_app(database_override=None):
                 return render_template("register.html", username=username), 400
             document["_id"] = result.inserted_id
             login_user(Account(document))
+            if email:
+                send_verification_for_account(db, document)
             flash("Your account was created.", "success")
             return redirect(url_for("dashboard"))
-        return render_template("register.html", username="")
+        return render_template("register.html", username="", email="")
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -1434,7 +1514,10 @@ def create_app(database_override=None):
             "google_email": claims["email"],
             "google_email_verified": True,
             "email": claims["email"],
+            "normalized_email": claims["email"],
+            "email_normalized": claims["email"],
             "email_verified": True,
+            "email_verified_at": now,
             "auth_methods": ["google"],
             "must_change_password": False,
             "created_at": now,
@@ -1599,6 +1682,88 @@ def create_app(database_override=None):
             connections=connections,
         )
 
+    @app.get("/verify-email/<token>")
+    def verify_email(token):
+        db = require_database()
+        record = consume_account_token(db, token, "verify_email")
+        if not record:
+            flash("That email verification link is invalid or has expired.", "error")
+            return redirect(url_for("login"))
+        db.accounts.update_one(
+            {"_id": record["user_id"], "email": record["email"]},
+            {"$set": {"email_verified": True, "email_verified_at": utc_now(), "updated_at": utc_now()}},
+        )
+        db.account_tokens.delete_one({"_id": record["_id"]})
+        flash("Your email has been verified.", "success")
+        return redirect(url_for("account" if current_user.is_authenticated else "login"))
+
+    @app.post("/account/email")
+    @login_required
+    def update_account_email():
+        db = require_database()
+        email = normalize_email(request.form.get("email"))
+        if not valid_email(email):
+            flash("Enter a valid email address.", "error")
+            return redirect(url_for("account"))
+        conflict = db.accounts.find_one({"$or": [{"normalized_email": email}, {"email_normalized": email}], "_id": {"$ne": current_account_id()}})
+        if conflict:
+            flash("That email is already in use.", "error")
+            return redirect(url_for("account"))
+        db.account_tokens.delete_many({"user_id": current_account_id(), "purpose": "verify_email"})
+        db.accounts.update_one(
+            {"_id": current_account_id()},
+            {"$set": {"email": email, "normalized_email": email, "email_normalized": email, "email_verified": False, "email_verified_at": None, "updated_at": utc_now()}},
+        )
+        account = db.accounts.find_one({"_id": current_account_id()})
+        send_verification_for_account(db, account)
+        flash("Email updated. Check your email to verify it.", "success")
+        return redirect(url_for("account"))
+
+    @app.post("/account/email/resend")
+    @login_required
+    def resend_verification_email():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if account and account.get("email") and account.get("email_verified") is not True:
+            send_verification_for_account(db, account)
+        flash("If your email can receive messages, a verification link has been sent.", "success")
+        return redirect(url_for("account"))
+
+    @app.route("/forgot-password", methods=["GET", "POST"])
+    def forgot_password():
+        if request.method == "POST":
+            email = normalize_email(request.form.get("email"))
+            db = require_database()
+            account = db.accounts.find_one({"$or": [{"normalized_email": email}, {"email_normalized": email}], "email_verified": True}) if valid_email(email) else None
+            if account and not email_rate_limited(db, f"reset:{account['_id']}"):
+                token = issue_account_token(db, account["_id"], "password_reset", email)
+                send_password_reset_email(app, recipient=email, token=token)
+            flash("If an account exists for that email, we've sent password reset instructions.", "success")
+            return redirect(url_for("login"))
+        return render_template("forgot_password.html")
+
+    @app.route("/reset-password/<token>", methods=["GET", "POST"])
+    def reset_password(token):
+        db = require_database()
+        record = consume_account_token(db, token, "password_reset")
+        if not record:
+            flash("That password reset link is invalid or has expired.", "error")
+            return redirect(url_for("forgot_password"))
+        if request.method == "POST":
+            password = request.form.get("password", "")
+            confirmation = request.form.get("confirm_password", "")
+            if len(password) < 8 or password != confirmation:
+                flash("Passwords must match and be at least 8 characters.", "error")
+                return render_template("reset_password.html", token=token), 400
+            db.accounts.update_one(
+                {"_id": record["user_id"]},
+                {"$set": {"password_hash": generate_password_hash(password), "must_change_password": False, "updated_at": utc_now()}, "$addToSet": {"auth_methods": "password"}},
+            )
+            db.account_tokens.delete_many({"user_id": record["user_id"], "purpose": "password_reset"})
+            flash("Password updated successfully.", "success")
+            return redirect(url_for("login"))
+        return render_template("reset_password.html", token=token)
+
     @app.post("/account/google/disconnect")
     @login_required
     def disconnect_google_identity():
@@ -1652,6 +1817,26 @@ def create_app(database_override=None):
             }, "$addToSet": {"auth_methods": "password"}},
         )
         flash("Password updated successfully.", "success")
+        return redirect(url_for("account"))
+
+    @app.post("/account/password/set")
+    @login_required
+    def set_password():
+        db = require_database()
+        password = request.form.get("new_password", "")
+        confirmation = request.form.get("confirm_password", "")
+        if len(password) < 8 or password != confirmation:
+            flash("Passwords must match and be at least 8 characters.", "error")
+            return redirect(url_for("account"))
+        db.accounts.update_one(
+            {"_id": current_account_id(), "$or": [
+                {"password_hash": {"$exists": False}},
+                {"password_hash": None},
+                {"password_hash": ""},
+            ]},
+            {"$set": {"password_hash": generate_password_hash(password), "must_change_password": False, "updated_at": utc_now()}, "$addToSet": {"auth_methods": "password"}},
+        )
+        flash("Password added successfully.", "success")
         return redirect(url_for("account"))
 
     @app.get("/account/availability")

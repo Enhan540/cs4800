@@ -12,5 +12,6 @@
   <div class="auth-divider"><span>or</span></div>
   <a class="button google-button" href="{{ url_for('google_auth') }}"><span class="google-mark" aria-hidden="true">G</span>Continue with Google</a>
   <p class="auth-switch">Don't have an account? <a href="{{ url_for('register') }}">Create Account</a></p>
+  <p class="auth-switch"><a href="{{ url_for('forgot_password') }}">Forgot password?</a></p>
 </div></section>
 {% endblock %}
