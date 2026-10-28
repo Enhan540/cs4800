@@ -273,7 +273,7 @@ def test_google_callback_creates_empty_account_without_storing_token(auth_app_an
     response = client.get(f"/auth/google/callback?state={state}")
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/dashboard")
+    assert response.headers["Location"].endswith("/account/complete-username")
     account = database.accounts.find_one({"google_sub": "google-user-123"})
     assert account["google_email"] == "person@example.com"
     assert account["auth_methods"] == ["google"]
@@ -427,6 +427,7 @@ def test_google_only_account_cannot_disconnect_its_only_login_method(auth_app_an
     client.get(f"/auth/google/callback?state={state}")
 
     account = database.accounts.find_one({"google_sub": "google-user-123"})
+    client.post("/account/complete-username", data={"username": "google-user"})
     response = client.post("/account/google/disconnect", follow_redirects=True)
 
     assert b"Set a password before disconnecting" in response.data

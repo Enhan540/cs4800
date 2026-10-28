@@ -61,7 +61,7 @@ class Account(UserMixin):
     def __init__(self, document):
         self.document = document
         self.id = str(document["_id"])
-        self.username = document["username"]
+        self.username = document.get("username") or ""
         self.auth_methods = document.get("auth_methods", [])
 
 
@@ -133,7 +133,10 @@ def create_app(database_override=None):
                 unique=True,
                 partialFilterExpression={"email": {"$type": "string"}},
             )
-            database.accounts.create_index("normalized_username", unique=True)
+            username_index = database.accounts.index_information().get("normalized_username_1")
+            if username_index and not username_index.get("sparse"):
+                database.accounts.drop_index("normalized_username_1")
+            database.accounts.create_index("normalized_username", unique=True, sparse=True)
             database.accounts.create_index("google_sub", unique=True, sparse=True)
             database.accounts.create_index("google_email", unique=True, sparse=True)
             database.accounts.create_index("normalized_email", unique=True, sparse=True)
@@ -401,16 +404,28 @@ def create_app(database_override=None):
 
     def normalize_time_text(value):
         """Accept common 12-hour text forms while storing a normalized HH:MM."""
-        value = (value or "").strip().upper().replace(" ", "")
+        value = (value or "").strip().upper().replace(" ", "").replace(".", "")
         if not value:
             return ""
-        match = re.fullmatch(r"(\d{1,2})(?::?(\d{2}))?(AM|PM)", value)
+        match = re.fullmatch(r"(\d{1,4})(?::?(\d{1,2}))?([AP]M?)?", value)
         if match:
-            hour, minute, period = int(match.group(1)), int(match.group(2) or 0), match.group(3)
+            hour_text, minute_text, period = match.groups()
+            if minute_text is None and period and len(hour_text) >= 3:
+                minute_text, hour_text = hour_text[-2:], hour_text[:-2]
+            hour, minute = int(hour_text), int(minute_text or 0)
+            if period in {"A", "P"}:
+                period = f"{period}M"
+            if period is None:
+                # A colon-form without a suffix remains a conventional 24-hour
+                # value (e.g. 09:45); compact bare hours are not accepted as
+                # complete submissions unless they include AM/PM.
+                if ":" not in value and minute_text is None:
+                    raise ValueError("Please enter a valid time.")
+                if not 0 <= hour <= 23 or minute > 59:
+                    raise ValueError("Please enter a valid time.")
+                return f"{hour:02d}:{minute:02d}"
             if not 1 <= hour <= 12 or minute > 59:
                 raise ValueError("Please enter a valid time.")
-            if minute % 5:
-                raise ValueError("Please enter a time in 5-minute increments.")
             hour = hour % 12 + (12 if period == "PM" else 0)
             return f"{hour:02d}:{minute:02d}"
         try:
@@ -419,8 +434,6 @@ def create_app(database_override=None):
             raise ValueError("Please enter a valid time.") from None
         if not 0 <= hour <= 23 or not 0 <= minute <= 59:
             raise ValueError("Please enter a valid time.")
-        if minute % 5:
-            raise ValueError("Please enter a time in 5-minute increments.")
         return f"{hour:02d}:{minute:02d}"
 
     def validate_availability_values(day, start_time, end_time):
@@ -551,6 +564,10 @@ def create_app(database_override=None):
         if values["minimum_attendance"] > group_size:
             errors.append("Minimum attendance cannot exceed the group size.")
         try:
+            if values["earliest_time"]:
+                values["earliest_time"] = normalize_time_text(values["earliest_time"])
+            if values["latest_time"]:
+                values["latest_time"] = normalize_time_text(values["latest_time"])
             if values["earliest_time"]:
                 parse_time(values["earliest_time"])
             if values["latest_time"]:
@@ -1268,6 +1285,26 @@ def create_app(database_override=None):
     def normalize_email(value):
         return str(value or "").strip().casefold()
 
+    def username_error(value):
+        username = str(value or "").strip()
+        if not USERNAME_PATTERN.fullmatch(username):
+            return "Username must be 3–40 characters and use only letters, numbers, underscores, or hyphens."
+        if username.casefold() in {"admin", "administrator", "root", "system", "support"}:
+            return "That username is reserved."
+        return None
+
+    def username_changes_this_month(account):
+        now = utc_now()
+        return sum(
+            1 for timestamp in account.get("username_change_history", [])
+            if isinstance(timestamp, datetime)
+            and timestamp.year == now.year
+            and timestamp.month == now.month
+        )
+
+    def username_change_remaining(account):
+        return max(0, 3 - username_changes_this_month(account))
+
     def valid_email(value):
         return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value or ""))
 
@@ -1319,6 +1356,18 @@ def create_app(database_override=None):
         db.account_tokens.delete_many({"user_id": account["_id"], "purpose": "verify_email"})
         token = issue_account_token(db, account["_id"], "verify_email", email)
         return send_verification_email(app, recipient=email, token=token)
+
+    @app.before_request
+    def enforce_username_setup():
+        if not current_user.is_authenticated:
+            return None
+        username = str(getattr(current_user, "username", "") or "").strip()
+        if username and not username_error(username):
+            return None
+        allowed = {"complete_username", "logout", "static", "google_callback"}
+        if request.endpoint not in allowed:
+            return redirect(url_for("complete_username"))
+        return None
 
     @app.route("/register", methods=["GET", "POST"])
     def register():
@@ -1410,7 +1459,7 @@ def create_app(database_override=None):
                     pending_google_link=True,
                 ), 400
             login_user(Account(account))
-            return redirect(next_url or url_for("dashboard"))
+            return redirect(next_url or (url_for("complete_username") if not account.get("username") else url_for("dashboard")))
         return render_template(
             "login.html", username="", next_url=next_url,
             pending_google_link=bool(pending_google_link(db)),
@@ -1491,7 +1540,7 @@ def create_app(database_override=None):
         account_document = db.accounts.find_one({"google_sub": claims["sub"]})
         if account_document:
             login_user(Account(account_document))
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("complete_username" if not account_document.get("username") else "dashboard"))
 
         email_owner = account_email_conflict(db, claims)
         if email_owner:
@@ -1506,10 +1555,7 @@ def create_app(database_override=None):
             flash("Google could not be connected to this account.", "error")
             return redirect(url_for("account"))
         now = utc_now()
-        username = available_google_username(profile, db)
         account_document = {
-            "username": username,
-            "normalized_username": username.casefold(),
             "google_sub": claims["sub"],
             "google_email": claims["email"],
             "google_email_verified": True,
@@ -1530,7 +1576,7 @@ def create_app(database_override=None):
             return redirect(url_for("login"))
         account_document["_id"] = result.inserted_id
         login_user(Account(account_document))
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("complete_username"))
 
     @app.get("/auth/google/connect")
     @login_required
@@ -1680,7 +1726,73 @@ def create_app(database_override=None):
             "account.html",
             account=document,
             connections=connections,
+            username_changes_remaining=username_change_remaining(document),
         )
+
+    @app.route("/account/complete-username", methods=["GET", "POST"])
+    @login_required
+    def complete_username():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account:
+            abort(404)
+        if account.get("username") and not username_error(account.get("username")):
+            return redirect(url_for("dashboard"))
+        username = request.form.get("username", "")
+        if request.method == "POST":
+            username = username.strip()
+            error = username_error(username)
+            if error:
+                flash(error, "error")
+                return render_template("complete_username.html", username=username), 400
+            try:
+                db.accounts.update_one(
+                    {"_id": account["_id"], "$or": [
+                        {"username": {"$exists": False}}, {"username": None}, {"username": ""}
+                    ]},
+                    {"$set": {"username": username, "normalized_username": username.casefold(), "updated_at": utc_now()}},
+                )
+            except DuplicateKeyError:
+                flash("That username is already taken.", "error")
+                return render_template("complete_username.html", username=username), 400
+            refreshed = db.accounts.find_one({"_id": account["_id"]})
+            if not refreshed.get("username"):
+                flash("That username is already taken.", "error")
+                return render_template("complete_username.html", username=username), 400
+            flash("Your account setup is complete.", "success")
+            return redirect(url_for("dashboard"))
+        return render_template("complete_username.html", username=username)
+
+    @app.route("/account/username", methods=["GET", "POST"])
+    @login_required
+    def change_username():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account:
+            abort(404)
+        remaining = username_change_remaining(account)
+        if request.method == "POST":
+            username = request.form.get("username", "").strip()
+            error = username_error(username)
+            if error:
+                flash(error, "error")
+            elif username.casefold() == str(account.get("username", "")).casefold():
+                flash("That is already your username.", "error")
+            elif remaining <= 0:
+                flash("Username changes are available again next month.", "error")
+            else:
+                try:
+                    result = db.accounts.update_one(
+                        {"_id": account["_id"], "normalized_username": {"$ne": username.casefold()}},
+                        {"$set": {"username": username, "normalized_username": username.casefold(), "updated_at": utc_now()}, "$push": {"username_change_history": utc_now()}},
+                    )
+                    if result.modified_count:
+                        flash("Username updated successfully.", "success")
+                        return redirect(url_for("account"))
+                except DuplicateKeyError:
+                    pass
+                flash("That username is already taken.", "error")
+        return render_template("change_username.html", account=account, remaining=username_change_remaining(account))
 
     @app.get("/verify-email/<token>")
     def verify_email(token):
@@ -2365,6 +2477,8 @@ def create_app(database_override=None):
         if not invite or invite.get("invited_user_id") != current_account_id():
             abort(404)
         if invite.get("status") != "pending":
+            if wants_json_response():
+                return jsonify({"ok": False, "error": "That invitation is no longer available."}), 409
             flash("This invitation has already been answered.", "error")
             return redirect(url_for("dashboard"))
         group = db.groups.find_one({"_id": invite.get("group_id")})
@@ -2373,6 +2487,8 @@ def create_app(database_override=None):
                 {"_id": invite["_id"], "status": "pending"},
                 {"$set": {"status": "declined", "responded_at": utc_now()}},
             )
+            if wants_json_response():
+                return jsonify({"ok": False, "error": "That invitation is no longer available."}), 409
             flash("That group no longer exists.", "error")
             return redirect(url_for("dashboard"))
         if status == "accepted":
@@ -2394,11 +2510,15 @@ def create_app(database_override=None):
         if notification:
             resolve_notification(db, notification["_id"], current_account_id())
         if result.modified_count != 1:
+            if wants_json_response():
+                return jsonify({"ok": False, "error": "That invitation is no longer available."}), 409
             flash("This invitation has already been answered.", "error")
         elif status == "accepted":
             flash(f"You joined {group['name']}.", "success")
         else:
             flash("Invitation declined.", "success")
+        if wants_json_response():
+            return jsonify({"ok": True, "status": status, "unread_count": unread_count(db, current_account_id())})
         return redirect(url_for("dashboard"))
 
     @app.post("/invitations/<invitation_id>/accept")
@@ -2448,6 +2568,53 @@ def create_app(database_override=None):
         )
         return jsonify({"ok": True, "unread_count": unread_count(db, current_account_id())})
 
+    @app.post("/api/notifications/mark-read")
+    @login_required
+    def mark_selected_notifications_read():
+        db = require_database()
+        ids = request.get_json(silent=True) or {}
+        selected = ids.get("ids", [])
+        object_ids = []
+        for value in selected:
+            try:
+                object_ids.append(ObjectId(value))
+            except (InvalidId, TypeError):
+                continue
+        db.notifications.update_many(
+            {"_id": {"$in": object_ids}, "recipient_user_id": current_account_id()},
+            {"$set": {"read_at": utc_now()}},
+        )
+        return jsonify({"ok": True, "unread_count": unread_count(db, current_account_id())})
+
+    @app.post("/api/notifications/delete")
+    @login_required
+    def delete_selected_notifications():
+        db = require_database()
+        payload = request.get_json(silent=True) or {}
+        selected = payload.get("ids", [])
+        object_ids = []
+        for value in selected:
+            try:
+                object_ids.append(ObjectId(value))
+            except (InvalidId, TypeError):
+                continue
+        db.notifications.delete_many(
+            {"_id": {"$in": object_ids}, "recipient_user_id": current_account_id()}
+        )
+        return jsonify({"ok": True, "unread_count": unread_count(db, current_account_id())})
+
+    @app.delete("/api/notifications/<notification_id>")
+    @login_required
+    def delete_notification(notification_id):
+        db = require_database()
+        result = db.notifications.delete_one({
+            "_id": object_id(notification_id),
+            "recipient_user_id": current_account_id(),
+        })
+        if not result.deleted_count:
+            abort(404)
+        return jsonify({"ok": True, "unread_count": unread_count(db, current_account_id())})
+
     def notification_payload(notification):
         metadata = notification.get("metadata", {})
         payload = {
@@ -2463,7 +2630,11 @@ def create_app(database_override=None):
             "scheduled_end": metadata.get("scheduled_end", ""),
             "invite_id": str(notification["invite_id"]) if notification.get("invite_id") else None,
             "plan_id": str(notification["plan_id"]) if notification.get("plan_id") else None,
+            "group_id": str(notification["group_id"]) if notification.get("group_id") else None,
         }
+        if notification.get("invite_id"):
+            invite = require_database().group_invites.find_one({"_id": notification["invite_id"]})
+            payload["invite_status"] = invite.get("status") if invite else "revoked"
         return payload
 
     @app.get("/api/notifications")

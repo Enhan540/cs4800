@@ -136,6 +136,54 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   const drawer = document.querySelector("[data-notification-drawer]");
   if (drawer) {
+    drawer.dataset.enhanced = "true";
+    const backdrop = document.querySelector("[data-notification-close]");
+    const list = drawer.querySelector("[data-notification-list]");
+    const refresh = drawer.querySelector("[data-notification-refresh]");
+    const count = drawer.querySelector("[data-notification-selected-count]");
+    const deselect = drawer.querySelector("[data-notification-deselect]");
+    const markSelected = drawer.querySelector("[data-notification-mark-selected]");
+    const deleteSelected = drawer.querySelector("[data-notification-delete-selected]");
+    const newCount = drawer.querySelector("[data-notification-new-count]");
+    let items = [];
+    let selected = new Set();
+    let filter = "all";
+    let loading = false;
+    const setUnread = (value) => document.querySelectorAll(".sidebar-unread-count").forEach((badge) => { badge.textContent = value || ""; badge.hidden = !value; });
+    const updateSelection = () => { const n = selected.size; count.textContent = `${n} selected`; [deselect, markSelected, deleteSelected].forEach((button) => { if (button) button.disabled = n === 0; }); };
+    const categoryMatch = (item) => filter === "all" || (filter === "invites" && item.type === "GROUP_INVITE") || (filter === "activity" && item.type !== "GROUP_INVITE");
+    const relativeTime = (value) => { const then = new Date(value); const seconds = Math.max(0, Math.floor((Date.now() - then.getTime()) / 1000)); if (seconds < 60) return "just now"; if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`; if (seconds < 172800) return "Yesterday"; return `${Math.floor(seconds / 86400)}d ago`; };
+    const initials = (value) => String(value || "Group").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "G";
+    const postAction = (action, id, label) => { const form = document.createElement("form"); form.method = "post"; form.action = action; form.dataset.notificationAction = "true"; const button = document.createElement("button"); button.className = `button ${label === "Decline" || label === "Not Going" ? "secondary" : ""}`.trim(); button.type = "submit"; button.textContent = label; button.setAttribute("aria-label", label); form.appendChild(button); return form; };
+    const render = () => {
+      list.replaceChildren();
+      const visible = items.filter(categoryMatch);
+      if (!visible.length) { const empty = document.createElement("p"); empty.className = "notification-empty"; empty.textContent = "You're all caught up."; list.appendChild(empty); updateSelection(); return; }
+      visible.forEach((item) => {
+        const card = document.createElement("article"); card.className = `notification-item${item.read ? " is-read" : ""}`; card.dataset.notificationId = item.id;
+        const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(item.id); check.setAttribute("aria-label", `Select notification ${item.group_name || item.plan_title || "update"}`); check.addEventListener("click", (event) => event.stopPropagation()); check.addEventListener("change", () => { if (check.checked) selected.add(item.id); else selected.delete(item.id); updateSelection(); });
+        const body = document.createElement("div"); body.className = "notification-body";
+        const remove = document.createElement("button"); remove.type = "button"; remove.className = "icon-button notification-delete"; remove.setAttribute("aria-label", "Delete notification"); remove.textContent = "×"; remove.addEventListener("click", async (event) => { event.stopPropagation(); if (!window.confirm("Delete this notification?")) return; const response = await fetch(`/api/notifications/${item.id}`, { method: "DELETE", headers: { "X-Requested-With": "fetch" } }); if (response.ok) { selected.delete(item.id); await refreshDrawer(); } });
+        if (item.type === "GROUP_INVITE") { const titleRow = document.createElement("div"); titleRow.className = "notification-title-row"; const icon = document.createElement("span"); icon.className = "notification-group-icon"; icon.textContent = initials(item.group_name); const title = document.createElement("b"); title.textContent = item.group_name; const time = document.createElement("time"); time.className = "notification-time"; time.dateTime = item.created_at; time.textContent = relativeTime(item.created_at); const unread = document.createElement("span"); unread.className = "notification-unread-indicator"; unread.hidden = item.read; unread.textContent = "●"; titleRow.append(icon, title, unread, time); const text = document.createElement("p"); text.textContent = `${item.actor_name} invited you to join this group.`; body.append(titleRow, text); const actions = document.createElement("div"); actions.className = "notification-actions"; if (item.invite_status === "pending") actions.append(postAction(`/invitations/${item.invite_id}/decline`, item.id, "Decline"), postAction(`/invitations/${item.invite_id}/accept`, item.id, "Join Group")); else { const stale = document.createElement("small"); stale.className = "notification-stale"; stale.textContent = "Invitation no longer available"; actions.append(stale); } body.appendChild(actions); }
+        if (item.type === "PLAN_SCHEDULED") { const link = document.createElement("a"); link.className = "notification-link"; link.href = `/plans/${item.plan_id}`; const title = document.createElement("b"); title.textContent = item.plan_title; const text = document.createElement("p"); text.textContent = "The plan has been scheduled."; const time = document.createElement("small"); time.textContent = `${item.scheduled_start.replace("T", " ")} – ${item.scheduled_end.replace("T", " ")}`; link.append(title, text, time); body.appendChild(link); const actions = document.createElement("div"); actions.className = "notification-actions"; actions.append(postAction(`/notifications/${item.id}/rsvp`, item.id, "Not Going"), postAction(`/notifications/${item.id}/rsvp`, item.id, "Attending")); actions.querySelectorAll("form").forEach((form, index) => { const input = document.createElement("input"); input.type = "hidden"; input.name = "status"; input.value = index === 0 ? "not_attending" : "attending"; form.prepend(input); }); body.appendChild(actions); }
+        card.append(check, body, remove); card.querySelectorAll("form[data-notification-action]").forEach((form) => form.addEventListener("submit", async (event) => { event.preventDefault(); const buttons = card.querySelectorAll("button"); buttons.forEach((button) => { button.disabled = true; }); const active = form.querySelector("button"); if (active) active.textContent = active.textContent === "Join Group" ? "Joining…" : active.textContent === "Decline" ? "Declining…" : "Saving…"; try { const response = await fetch(form.action, { method: "POST", headers: { "X-Requested-With": "fetch", Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(new FormData(form)) }); const payload = await response.json(); if (!response.ok || !payload.ok) throw new Error(payload.error || "Action could not be completed."); selected.delete(item.id); await refreshDrawer(); } catch (error) { let message = card.querySelector(".notification-inline-error"); if (!message) { message = document.createElement("small"); message.className = "notification-inline-error"; body.appendChild(message); } message.textContent = error.message; buttons.forEach((button) => { button.disabled = false; }); if (active) active.textContent = active.textContent.includes("Joining") ? "Join Group" : active.textContent.includes("Declining") ? "Decline" : "Save"; } })); list.appendChild(card);
+      });
+      updateSelection();
+    };
+    const refreshDrawer = async () => { if (loading) return; loading = true; refresh.disabled = true; refresh.classList.add("is-loading"); try { const response = await fetch("/api/notifications", { headers: { Accept: "application/json" } }); if (!response.ok) throw new Error(); const payload = await response.json(); items = payload.notifications; const available = new Set(items.map((item) => item.id)); selected = new Set([...selected].filter((id) => available.has(id))); newCount.textContent = payload.unread_count ? `${payload.unread_count} new` : ""; newCount.hidden = !payload.unread_count; setUnread(payload.unread_count); render(); } catch (_error) { let status = drawer.querySelector("[data-notification-refresh-status]"); if (!status) { status = document.createElement("p"); status.className = "notification-refresh-status"; drawer.querySelector(".notification-drawer-actions")?.after(status); } status.textContent = "Couldn't refresh notifications."; } finally { loading = false; refresh.disabled = false; refresh.classList.remove("is-loading"); } };
+    const batch = async (url) => { const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" }, body: JSON.stringify({ ids: [...selected] }) }); if (!response.ok) throw new Error(); const payload = await response.json(); setUnread(payload.unread_count); selected.clear(); await refreshDrawer(); };
+    refresh?.addEventListener("click", (event) => { event.stopPropagation(); refreshDrawer(); });
+    deselect?.addEventListener("click", () => { selected.clear(); render(); });
+    markSelected?.addEventListener("click", () => batch("/api/notifications/mark-read").catch(() => {}));
+    deleteSelected?.addEventListener("click", () => { if (window.confirm(`Delete ${selected.size} notification${selected.size === 1 ? "" : "s"}?`)) batch("/api/notifications/delete").catch(() => {}); });
+    drawer.querySelectorAll("[data-notification-filter]").forEach((button) => button.addEventListener("click", () => { filter = button.dataset.notificationFilter; drawer.querySelectorAll("[data-notification-filter]").forEach((tab) => tab.classList.toggle("is-active", tab === button)); render(); }));
+    const closeDrawer = () => { drawer.hidden = true; drawer.setAttribute("aria-hidden", "true"); if (backdrop) backdrop.hidden = true; document.body.classList.remove("notification-drawer-open"); };
+    document.querySelectorAll("[data-notification-open]").forEach((button) => button.addEventListener("click", () => { drawer.hidden = false; drawer.setAttribute("aria-hidden", "false"); if (backdrop) backdrop.hidden = false; document.body.classList.add("notification-drawer-open"); refreshDrawer(); }));
+    document.querySelectorAll("[data-notification-close]").forEach((button) => button.addEventListener("click", closeDrawer));
+    drawer.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawer(); });
+    window.setInterval(async () => { if (document.hidden) return; try { const response = await fetch("/api/notifications/summary", { headers: { Accept: "application/json" } }); if (response.ok) setUnread((await response.json()).unread_count); } catch (_error) {} }, NOTIFICATION_POLL_INTERVAL_MS);
+  }
+  if (drawer && !drawer.dataset.enhanced) {
     const backdrop = document.querySelector("[data-notification-close]");
     const list = drawer.querySelector("[data-notification-list]");
     const refresh = drawer.querySelector("[data-notification-refresh]");
@@ -295,17 +343,79 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   const parseTime = (value) => {
-    const compact = value.trim().toUpperCase().replace(/\s+/g, "");
-    const match = compact.match(/^(\d{1,2})(?::?(\d{2}))?(AM|PM)$/);
+    const compact = String(value ?? "").trim().toUpperCase().replace(/[.\s]/g, "");
+    if (!compact || !/^[0-9:APM]+$/.test(compact)) return null;
+    const match = compact.match(/^(\d{1,4})(?::?(\d{1,2}))?([AP]M?|)$/);
     if (!match) return null;
-    const hour = Number(match[1]);
-    const minute = Number(match[2] || "0");
-    if (hour < 1 || hour > 12 || minute > 59 || minute % 5 !== 0) return null;
-    return (hour % 12) * 60 + minute + (match[3] === "PM" ? 720 : 0);
+    let hourText = match[1];
+    let minuteText = match[2];
+    const periodText = match[3];
+    if (minuteText === undefined && hourText.length >= 3) {
+      minuteText = hourText.slice(-2);
+      hourText = hourText.slice(0, -2);
+    }
+    const hour = Number(hourText);
+    const minute = Number(minuteText || "0");
+    if (hour < 1 || hour > 12 || minute > 59) return null;
+    if (periodText && !["A", "AM", "P", "PM"].includes(periodText)) return null;
+    // Bare clock text is treated as morning in the manual-entry UI. Picker
+    // selections and submitted values still carry an explicit period/24-hour value.
+    return (hour % 12) * 60 + minute + (["P", "PM"].includes(periodText) ? 720 : 0);
   };
   const formatTime = (minutes) => {
     const hour = Math.floor((minutes % 720) / 60) || 12;
-    return `${String(hour).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")} ${minutes >= 720 ? "PM" : "AM"}`;
+    return `${hour}:${String(minutes % 60).padStart(2, "0")} ${minutes >= 720 ? "P.M." : "A.M."}`;
+  };
+  const formatTypedTime = (value) => {
+    const raw = String(value ?? "").trim().toUpperCase().replace(/[.\s]/g, "");
+    if (!raw) return "";
+    const suffixMatch = raw.match(/([AP]M?)$/);
+    const suffix = suffixMatch ? (suffixMatch[1].length === 1 ? `${suffixMatch[1]}M` : suffixMatch[1]) : "";
+    const body = suffixMatch ? raw.slice(0, -suffixMatch[1].length) : raw;
+    if (!/^\d{1,6}:?\d{0,2}$/.test(body)) return null;
+    let digits = body.replace(":", "");
+    // A pasted/rapid sequence such as 17111 contains an illegal `7` in the
+    // ambiguous 1x position. Drop only that illegal digit, yielding 11:11.
+    if (digits.length > 4) {
+      if (digits[0] === "1" && Number(digits[1]) > 5) digits = digits[0] + digits.slice(2);
+      else return null;
+    }
+    let hourText = ""; let minuteText = "";
+    if (body.includes(":")) {
+      [hourText, minuteText] = body.split(":");
+      if (hourText.length > 2 || (hourText && Number(hourText) > 12)) return null;
+      if (minuteText && Number(minuteText[0]) > 5) return body.slice(0, -1);
+    } else if (digits.length <= 2) {
+      if (digits.length === 1) {
+        if (digits === "0") return digits;
+        return Number(digits) >= 2 ? `${digits}:` : digits;
+      }
+      const first = Number(digits[0]);
+      const second = Number(digits[1]);
+      if (first === 0) return second === 0 ? null : `${second}:`;
+      if (first === 1) {
+        if (second <= 2) return `${digits}:`;
+        // 13–15 begin a compact hour/minute entry. 16–19 are not valid
+        // minute-tens digits, so ignore that keystroke and keep the `1`.
+        return second <= 5 ? `1:${second}` : "1";
+      }
+      // For 2–9 the first digit is already the hour. A second digit is
+      // accepted only as a valid minute tens digit; 99 must not become 9:09.
+      return second <= 5 ? `${first}:${second}` : `${first}:`;
+    } else if (digits.length === 3) {
+      if (Number(digits.slice(0, 2)) <= 12) { hourText = digits.slice(0, 2); minuteText = digits.slice(2); }
+      else { hourText = digits[0]; minuteText = digits.slice(1); }
+    } else { hourText = digits.slice(0, 2); minuteText = digits.slice(2); }
+    if (!hourText) return body;
+    const hour = Number(hourText);
+    if (hour < 1 || hour > 12 || (minuteText && Number(minuteText) > 59)) return null;
+    let result = `${Number(hourText)}:${minuteText}`;
+    if (suffix) {
+      if (!minuteText) result = `${Number(hourText)}:00`;
+      else if (minuteText.length === 1) result = `${Number(hourText)}:${minuteText}0`;
+      result += ` ${suffix === "PM" ? "P.M." : "A.M."}`;
+    }
+    return result;
   };
   const normalizedTime = (value) => {
     const minutes = parseTime(value);
@@ -324,7 +434,12 @@ document.addEventListener("DOMContentLoaded", () => {
   let pickerLayoutOwner = null;
   const setDialogTime = (minutes) => {
     dialogHour.value = String(Math.floor((minutes % 720) / 60) || 12);
-    dialogMinute.value = String(minutes % 60).padStart(2, "0");
+    const minute = String(minutes % 60).padStart(2, "0");
+    if (![...dialogMinute.options].some((option) => option.value === minute)) {
+      const option = document.createElement("option"); option.value = minute; option.textContent = minute;
+      dialogMinute.appendChild(option);
+    }
+    dialogMinute.value = minute;
     dialogPeriod.value = minutes >= 720 ? "PM" : "AM";
   };
   const dialogMinutes = () => (Number(dialogHour.value) % 12) * 60 + Number(dialogMinute.value) + (dialogPeriod.value === "PM" ? 720 : 0);
@@ -400,6 +515,21 @@ document.addEventListener("DOMContentLoaded", () => {
     input.addEventListener("focus", () => openPicker(input));
     input.addEventListener("click", () => openPicker(input));
     input.addEventListener("input", () => {
+      let rawValue = input.value;
+      const deleting = input.dataset.deleting === "true";
+      // When deleting the final character of AM/PM, do not immediately
+      // reconstruct the suffix from the remaining lone A/P character.
+      if (deleting && /\s*[AP](?:\.?M)?\.?\s*$/i.test(rawValue)) {
+        rawValue = rawValue.replace(/\s*[AP](?:\.?M)?\.?\s*$/i, "");
+      }
+      input.dataset.deleting = "false";
+      const formatted = deleting && /^\d{1,2}$/.test(rawValue)
+        ? rawValue
+        : formatTypedTime(rawValue);
+      if (formatted === null) { input.value = input.dataset.lastAccepted || ""; return; }
+      input.value = formatted;
+      input.dataset.lastAccepted = formatted;
+      input.setSelectionRange(input.value.length, input.value.length);
       const minutes = parseTime(input.value);
       if (minutes !== null && activeTimeInput === input) setDialogTime(minutes);
     });
@@ -408,13 +538,16 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!input.value.trim()) return;
       const minutes = parseTime(input.value);
       if (minutes === null) {
-        input.setCustomValidity("Please enter a time in 5-minute increments.");
+        input.setCustomValidity("Please enter a valid time.");
+        input.classList.add("time-input-invalid");
       } else {
         input.setCustomValidity("");
         input.value = formatTime(minutes);
+        input.classList.remove("time-input-invalid");
       }
     });
     input.addEventListener("keydown", (event) => {
+      input.dataset.deleting = event.key === "Backspace" || event.key === "Delete" ? "true" : "false";
       if (event.key === "Enter") {
         const minutes = parseTime(input.value);
         if (minutes !== null) { setDialogTime(minutes); closePicker(true); }
@@ -639,7 +772,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const startMinutes = parseTime(start.value);
         const endMinutes = parseTime(end.value);
         if (startMinutes === null || endMinutes === null) {
-          (startMinutes === null ? start : end).setCustomValidity("Please enter a time in 5-minute increments.");
+          (startMinutes === null ? start : end).setCustomValidity("Please enter a valid time.");
           (startMinutes === null ? start : end).reportValidity();
           return;
         }
@@ -705,7 +838,9 @@ document.addEventListener("DOMContentLoaded", () => {
         end_time: normalizedTime(row.querySelector('[name="end_time"]').value),
       }));
       if (changes.some((change) => !change.deleted && (!change.start_time || !change.end_time))) {
-        window.alert("Please enter all times in 5-minute increments before saving."); return;
+        const message = current.querySelector("[data-availability-form-message]");
+        if (message) message.textContent = "Please enter valid times before saving.";
+        return;
       }
       bulkForm.querySelector("[data-availability-payload]").value = JSON.stringify(changes);
       dirty = false;
@@ -757,16 +892,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   windowDialog?.querySelector("[data-window-dialog-close]")?.addEventListener("click", closeWindowDialog);
   windowDialog?.querySelector("[data-window-dialog-cancel]")?.addEventListener("click", closeWindowDialog);
-  windowDialog?.querySelector("[data-window-dialog-delete]")?.addEventListener("click", async () => {
+  windowDialog?.querySelector("[data-window-dialog-delete]")?.addEventListener("click", () => {
     const id = windowDialog.dataset.entryId;
-    if (!id || !window.confirm("Delete this availability window?")) return;
-    const response = await fetch(windowDialog.dataset.deleteUrlTemplate.replace("ENTRY_ID", id), {
-      method: "POST", headers: {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-      body: new URLSearchParams({return_to: windowForm.querySelector('[name="return_to"]').value}),
-    });
-    if (!response.ok) return;
-    removeAvailabilityBlock(id, windowDialog.dataset.entryDay);
-    closeWindowDialog();
+    if (!id) return;
+    openAvailabilityDeleteConfirmation(id, windowDialog.dataset.entryDay, "specific");
   });
   dialog?.addEventListener("click", (event) => event.stopPropagation());
   dialog?.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -786,7 +915,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const endMinutes = parseTime(windowEnd.value);
     if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) {
       const invalid = startMinutes === null ? windowStart : windowEnd;
-      invalid.setCustomValidity(endMinutes <= startMinutes ? "End time must be later than start time." : "Please enter a time in 5-minute increments.");
+      invalid.setCustomValidity(endMinutes <= startMinutes ? "End time must be later than start time." : "Please enter a valid time.");
       invalid.reportValidity(); invalid.setCustomValidity(""); return;
     }
     windowStart.value = formatTime(startMinutes); windowEnd.value = formatTime(endMinutes);
@@ -815,6 +944,20 @@ document.addEventListener("DOMContentLoaded", () => {
   let stagedWindows = new Map();
   let activeWindowId = null;
   let pendingDeleteId = null;
+  let pendingDeleteMode = null;
+  let pendingDeleteDay = null;
+  const openAvailabilityDeleteConfirmation = (id, day, mode = "day") => {
+    const entry = mode === "day" ? stagedWindows.get(id) : null;
+    pendingDeleteId = id;
+    pendingDeleteMode = mode;
+    pendingDeleteDay = day;
+    const start = entry?.start_time || windowStart?.value || "";
+    const end = entry?.end_time || windowEnd?.value || "";
+    if (dayDeleteMessage) {
+      dayDeleteMessage.textContent = `${stagedTimeText(start)} – ${stagedTimeText(end)}\n\nAre you sure you want to remove this availability window?`;
+    }
+    showStableDialog(dayDeleteDialog);
+  };
   const dayEntries = () => Array.from(activeDayColumn?.querySelectorAll(
     "[data-availability-window], [data-availability-window-readonly]",
   ) || []).map((block) => ({
@@ -973,9 +1116,7 @@ document.addEventListener("DOMContentLoaded", () => {
       event.stopPropagation();
       const entry = stagedWindows.get(remove.dataset.dayWindowDelete);
       if (!entry) return;
-      pendingDeleteId = entry.id;
-      dayDeleteMessage.textContent = `${stagedTimeText(entry.start_time)} – ${stagedTimeText(entry.end_time)}\n\nAre you sure you want to remove this availability window?`;
-      showStableDialog(dayDeleteDialog);
+      openAvailabilityDeleteConfirmation(entry.id, activeDay, "day");
       return;
     }
     const selected = event.target.closest("[data-day-window-select]");
@@ -993,25 +1134,54 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   dayDeleteCancelButtons?.forEach((button) => button.addEventListener("click", () => {
     pendingDeleteId = null;
+    pendingDeleteMode = null;
+    pendingDeleteDay = null;
     closeStableDialog(dayDeleteDialog);
   }));
   dayDeleteDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
     pendingDeleteId = null;
+    pendingDeleteMode = null;
+    pendingDeleteDay = null;
     closeStableDialog(dayDeleteDialog);
   });
   dayDeleteDialog?.addEventListener("click", (event) => {
     if (event.target === dayDeleteDialog) {
       pendingDeleteId = null;
+      pendingDeleteMode = null;
+      pendingDeleteDay = null;
       closeStableDialog(dayDeleteDialog);
     }
   });
-  dayDeleteConfirm?.addEventListener("click", () => {
+  dayDeleteConfirm?.addEventListener("click", async () => {
     if (!pendingDeleteId) return;
+    if (pendingDeleteMode === "specific") {
+      const id = pendingDeleteId;
+      dayDeleteConfirm.disabled = true;
+      try {
+        const response = await fetch(windowDialog.dataset.deleteUrlTemplate.replace("ENTRY_ID", id), {
+          method: "POST", headers: {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+          body: new URLSearchParams({return_to: windowForm.querySelector('[name="return_to"]').value}),
+        });
+        if (!response.ok) {
+          dayDeleteMessage.textContent = "This availability window could not be deleted.";
+          return;
+        }
+        removeAvailabilityBlock(id, pendingDeleteDay || windowDialog.dataset.entryDay);
+        pendingDeleteId = null; pendingDeleteMode = null; pendingDeleteDay = null;
+        closeStableDialog(dayDeleteDialog);
+        closeWindowDialog();
+      } finally {
+        dayDeleteConfirm.disabled = false;
+      }
+      return;
+    }
     captureActiveWindow();
     stagedWindows.delete(pendingDeleteId);
     if (activeWindowId === pendingDeleteId) activeWindowId = null;
     pendingDeleteId = null;
+    pendingDeleteMode = null;
+    pendingDeleteDay = null;
     closeStableDialog(dayDeleteDialog);
     renderDayWindows();
   });
@@ -1051,7 +1221,7 @@ document.addEventListener("DOMContentLoaded", () => {
     })));
     const invalid = changes.find((change) => !change.deleted && (!change.start_time || !change.end_time || change.end_time <= change.start_time));
     const message = dayDialog.querySelector("[data-day-message]");
-    if (invalid) { message.textContent = "Enter valid five-minute times with the end after the start."; return; }
+    if (invalid) { message.textContent = "Enter valid times with the end after the start."; return; }
     if (!changes.length) { updateDayActions(); return; }
     const action = document.querySelector("[data-availability-bulk]").action;
     daySaveButton.disabled = true;

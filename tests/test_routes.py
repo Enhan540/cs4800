@@ -1380,7 +1380,7 @@ def test_unified_availability_time_input_accepts_valid_five_minute_times(
     assert (saved["start_time"], saved["end_time"]) == (stored_start, stored_end)
 
 
-def test_unified_availability_time_input_rejects_non_five_minute_times(app_and_db):
+def test_unified_availability_time_input_accepts_any_valid_minute(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one(
         {"display_name": "Alex", "normalized_name": "alex"}
@@ -1390,8 +1390,10 @@ def test_unified_availability_time_input_rejects_non_five_minute_times(app_and_d
         "day": "Monday", "start_time": "10:03 AM", "end_time": "04:00 PM",
     }, follow_redirects=True)
 
-    assert b"Please enter a time in 5-minute increments." in response.data
-    assert database.availability.count_documents({"user_id": member_id}) == 0
+    saved = database.availability.find_one({"user_id": member_id, "day": "Monday"})
+    assert response.status_code == 200
+    assert saved["start_time"] == "10:03"
+    assert saved["end_time"] == "16:00"
 
 
 def test_attendance_modifiers_are_optional_and_cleared_for_not_attending(app_and_db):

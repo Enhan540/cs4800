@@ -21,12 +21,7 @@
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="messages" aria-live="polite">{% for category, message in messages %}<p class="message {{ category }}">{{ message }}</p>{% endfor %}</div>{% endif %}{% endwith %}
     {% block content %}{% endblock %}
   </main>
-<<<<<<< HEAD
   {% if current_user.is_authenticated %}{% include 'partials/notification_drawer.html' %}{% endif %}
-  <div class="time-picker-popover" data-time-picker-dialog aria-labelledby="time-picker-title" role="dialog" hidden><h2 id="time-picker-title">Choose time</h2><div class="time-wheel-controls"><label>Hour<select data-picker-hour>{% for hour in range(1, 13) %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}</select></label><label>Minute<select data-picker-minute>{% for minute in range(0, 60, 5) %}<option value="{{ '%02d'|format(minute) }}">{{ '%02d'|format(minute) }}</option>{% endfor %}</select></label><label>Period<select data-picker-period><option>AM</option><option>PM</option></select></label></div><div class="button-row"><button class="button secondary" type="button" data-picker-cancel>Cancel</button><button class="button" type="button" data-picker-ok>OK</button></div></div>
-  <dialog class="app-dialog unsaved-dialog" data-unsaved-dialog aria-labelledby="unsaved-dialog-title"><div class="dialog-heading"><div><p class="eyebrow">Unsaved Changes</p><h2 id="unsaved-dialog-title">You have changes that haven't been saved.</h2></div></div><p data-unsaved-message>These changes have not been saved.</p><div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div></dialog>
-  <script>window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };</script><script defer src="/_vercel/insights/script.js"></script><script src="{{ url_for('static', filename='js/app.js') }}"></script>
-=======
   <div class="time-picker-popover" data-time-picker-dialog aria-labelledby="time-picker-title" role="dialog" hidden>
       <h2 id="time-picker-title">Choose time</h2>
       <div class="time-wheel-controls"><label>Hour<select data-picker-hour>{% for hour in range(1, 13) %}<option value="{{ hour }}">{{ hour }}</option>{% endfor %}</select></label><label>Minute<select data-picker-minute>{% for minute in range(0, 60, 5) %}<option value="{{ '%02d'|format(minute) }}">{{ '%02d'|format(minute) }}</option>{% endfor %}</select></label><label>Period<select data-picker-period><option>AM</option><option>PM</option></select></label></div>
@@ -37,12 +32,8 @@
     <p data-unsaved-message>These changes have not been saved.</p>
     <div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div>
   </dialog>
-  <script>
-    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
-  </script>
+  <script>window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };</script>
   <script defer src="/_vercel/insights/script.js"></script>
-  <script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
->>>>>>> 5a66678822590c5281666ba722024ebcc0fadbc5
 </body>
 </html>
