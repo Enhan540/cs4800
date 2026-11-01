@@ -6,6 +6,62 @@ import pytest
 from services.calendar_service import normalized_interval, parse_ical_busy_intervals, safe_calendar_url
 
 
+def test_cancelled_and_transparent_events_do_not_block_time():
+    payload = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:transparent@test
+DTSTART:20261102T170000Z
+DTEND:20261102T180000Z
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:cancelled@test
+DTSTART:20261102T180000Z
+DTEND:20261102T190000Z
+STATUS:CANCELLED
+END:VEVENT
+BEGIN:VEVENT
+UID:busy@test
+DTSTART:20261102T190000Z
+DTEND:20261102T200000Z
+END:VEVENT
+END:VCALENDAR
+"""
+    assert parse_ical_busy_intervals(
+        payload, start=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 3, tzinfo=timezone.utc),
+    ) == [{"start": datetime(2026, 11, 2, 19), "end": datetime(2026, 11, 2, 20)}]
+
+
+def test_cancelled_recurrence_instance_does_not_block_time():
+    payload = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:weekly@test
+DTSTART:20261102T190000Z
+DTEND:20261102T200000Z
+RRULE:FREQ=DAILY;COUNT=2
+END:VEVENT
+BEGIN:VEVENT
+UID:weekly@test
+RECURRENCE-ID:20261103T190000Z
+DTSTART:20261103T190000Z
+DTEND:20261103T200000Z
+STATUS:CANCELLED
+END:VEVENT
+END:VCALENDAR
+"""
+    intervals = parse_ical_busy_intervals(
+        payload, start=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 5, tzinfo=timezone.utc),
+    )
+    assert intervals == [{"start": datetime(2026, 11, 2, 19),
+                          "end": datetime(2026, 11, 2, 20)}]
+
+
 def test_ical_events_are_normalized_and_merged():
     payload = b"""BEGIN:VCALENDAR
 VERSION:2.0

@@ -439,6 +439,14 @@ def test_group_heatmap_start_clamps_at_midnight(app_and_db):
 
 def test_sync_now_replaces_stale_shifted_ical_cache(app_and_db, monkeypatch):
     app, database = app_and_db
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "calendar-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    owner = database.accounts.find_one({"normalized_username": "calendar-owner"})
+    monkeypatch.setattr("app.utc_now", lambda: datetime(2026, 10, 25, tzinfo=timezone.utc))
     payload = b"""BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//Group Planner Test//EN
@@ -453,7 +461,7 @@ END:VCALENDAR
     key = base64.urlsafe_b64encode(hashlib.sha256(b"test-secret").digest())
     encrypted = Fernet(key).encrypt(json.dumps({"url": "https://calendar.example/test.ics"}).encode()).decode()
     connection_id = database.calendar_connections.insert_one({
-        "account_id": None,
+        "account_id": owner["_id"],
         "provider": "ical",
         "secret_ciphertext": encrypted,
         "sync_status": "connected",
@@ -463,7 +471,7 @@ END:VCALENDAR
         }],
     }).inserted_id
 
-    response = app.test_client().post(f"/account/calendars/{connection_id}/sync")
+    response = client.post(f"/account/calendars/{connection_id}/sync")
     updated = database.calendar_connections.find_one({"_id": connection_id})
 
     assert response.status_code == 302
