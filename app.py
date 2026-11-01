@@ -650,9 +650,9 @@ def create_app(database_override=None):
                     {"_id": scheduled_plan["group_id"]}, {"member_ids": 1}
                 ) or {}
                 scheduled_member_ids = plan_member_ids(scheduled_plan, scheduled_group)
-                for account_id, member_ids in member_ids_by_account.items():
+                for account_id, account_member_ids in member_ids_by_account.items():
                     scheduled_member_id = next(
-                        (member_id for member_id in scheduled_member_ids if member_id in member_ids),
+                        (member_id for member_id in scheduled_member_ids if member_id in account_member_ids),
                         None,
                     )
                     if not scheduled_member_id:

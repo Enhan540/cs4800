@@ -849,6 +849,52 @@ def test_plan_generation_excludes_existing_scheduled_plan(app_and_db):
     assert response.get_json()["results"][0]["start"] == "19:00"
 
 
+def test_scheduled_conflicts_preserve_all_five_linked_participants(app_and_db):
+    app, database = app_and_db
+    member_ids = []
+    for index in range(5):
+        account_id = database.accounts.insert_one({"username": f"member-{index}"}).inserted_id
+        member_id = database.users.insert_one({
+            "display_name": f"Member {index}", "normalized_name": f"member-{index}",
+            "linked_account_id": account_id,
+        }).inserted_id
+        member_ids.append(member_id)
+        add_preview_availability(database, member_id, "18:00", "21:00")
+    group_id = make_group(database, member_ids=member_ids)
+    make_plan(
+        database, group_id, title="Existing commitment", status="scheduled",
+        invited_member_ids=[member_ids[0]],
+        scheduled_start=datetime(2026, 10, 23, 18),
+        scheduled_end=datetime(2026, 10, 23, 19),
+    )
+    fields = {
+        "title": "Five-person plan", "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "60", "minimum_attendance": "5",
+        "earliest_time": "18:00", "latest_time": "21:00",
+    }
+    client = app.test_client()
+    response = client.post(f"/groups/{group_id}/schedule-preview", data=fields)
+    assert response.status_code == 200
+    best = response.get_json()["results"][0]
+    assert (best["start"], best["attendance"], best["group_size"]) == ("19:00", 5, 5)
+
+    lower_minimum = client.post(f"/groups/{group_id}/schedule-preview", data={
+        **fields, "minimum_attendance": "4",
+    }).get_json()
+    overlapping = next(item for item in lower_minimum["results"] if item["start"] == "18:00")
+    assert (overlapping["attendance"], overlapping["group_size"]) == (4, 5)
+
+    assert client.post(f"/groups/{group_id}/plans/create", data=fields).status_code == 302
+    plan = database.plans.find_one({"title": fields["title"]})
+    assert plan["invited_member_ids"] == member_ids
+    assert plan["matches"][0]["total_members"] == 5
+    assert set(plan["matches"][0]["available_member_ids"]) == {str(value) for value in member_ids}
+
+    assert client.post(f"/plans/{plan['_id']}/find-times").status_code == 302
+    regenerated = database.plans.find_one({"_id": plan["_id"]})
+    assert regenerated["matches"] == plan["matches"]
+
+
 def test_plan_creation_and_opening_generate_matches_automatically(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
