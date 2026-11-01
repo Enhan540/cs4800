@@ -132,12 +132,11 @@ def parse_ical_busy_intervals(payload, *, start=None, end=None, default_timezone
         raise ValueError("Calendar feed is not valid iCalendar data.") from exc
     if calendar.get("VERSION") is None or calendar.get("PRODID") is None:
         raise ValueError("Calendar feed is not valid iCalendar data.")
-    intervals = []
-    try:
-        events = recurring_ical_events.of(calendar).between(start, end)
-    except Exception:
-        events = calendar.walk("VEVENT")
-    for event in events:
+    def event_interval(event):
+        if str(event.get("TRANSP", "")).upper() == "TRANSPARENT":
+            return None
+        if str(event.get("STATUS", "")).upper() == "CANCELLED":
+            return None
         try:
             event_start = event.decoded("DTSTART")
             event_end = event.decoded("DTEND") if event.get("DTEND") else None
@@ -145,11 +144,26 @@ def parse_ical_busy_intervals(payload, *, start=None, end=None, default_timezone
                 event_end = event_start + event.decoded("DURATION")
             if event_end is None:
                 event_end = event_start + timedelta(days=1)
-            intervals.append(normalized_interval(
-                event_start, event_end, default_timezone=default_timezone
-            ))
+            return normalized_interval(event_start, event_end, default_timezone=default_timezone)
         except (KeyError, ValueError, TypeError):
-            continue
+            return None
+
+    calendar.subcomponents = [
+        component for component in calendar.subcomponents
+        if component.name != "VEVENT"
+        or str(component.get("STATUS", "")).upper() == "CANCELLED"
+        or str(component.get("TRANSP", "")).upper() == "TRANSPARENT"
+        or event_interval(component) is not None
+    ]
+    intervals = []
+    try:
+        events = recurring_ical_events.of(calendar).between(start, end)
+    except Exception:
+        events = calendar.walk("VEVENT")
+    for event in events:
+        interval = event_interval(event)
+        if interval is not None:
+            intervals.append(interval)
     return merge_intervals(intervals)
 
 

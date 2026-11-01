@@ -439,6 +439,14 @@ def test_group_heatmap_start_clamps_at_midnight(app_and_db):
 
 def test_sync_now_replaces_stale_shifted_ical_cache(app_and_db, monkeypatch):
     app, database = app_and_db
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "calendar-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    owner = database.accounts.find_one({"normalized_username": "calendar-owner"})
+    monkeypatch.setattr("app.utc_now", lambda: datetime(2026, 10, 25, tzinfo=timezone.utc))
     payload = b"""BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//Group Planner Test//EN
@@ -453,7 +461,7 @@ END:VCALENDAR
     key = base64.urlsafe_b64encode(hashlib.sha256(b"test-secret").digest())
     encrypted = Fernet(key).encrypt(json.dumps({"url": "https://calendar.example/test.ics"}).encode()).decode()
     connection_id = database.calendar_connections.insert_one({
-        "account_id": None,
+        "account_id": owner["_id"],
         "provider": "ical",
         "secret_ciphertext": encrypted,
         "sync_status": "connected",
@@ -463,7 +471,7 @@ END:VCALENDAR
         }],
     }).inserted_id
 
-    response = app.test_client().post(f"/account/calendars/{connection_id}/sync")
+    response = client.post(f"/account/calendars/{connection_id}/sync")
     updated = database.calendar_connections.find_one({"_id": connection_id})
 
     assert response.status_code == 302
@@ -786,6 +794,105 @@ def test_schedule_preview_invalid_input_is_safe_and_creates_nothing(app_and_db):
     assert response.status_code == 400
     assert response.get_json()["success"] is False
     assert database.plans.count_documents({}) == 0
+
+
+def test_preview_create_and_regeneration_use_same_member_snapshot(app_and_db):
+    app, database = app_and_db
+    first = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
+    second = database.users.insert_one({"display_name": "Sam", "normalized_name": "sam"}).inserted_id
+    group_id = make_group(database, member_ids=[first])
+    add_preview_availability(database, first, "18:05", "20:00")
+    add_preview_availability(database, second, "19:00", "20:00")
+    client = app.test_client()
+    fields = {
+        "title": "Dinner", "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "60", "minimum_attendance": "1",
+        "earliest_time": "17:00", "latest_time": "21:00",
+    }
+    preview = client.post(f"/groups/{group_id}/schedule-preview", data=fields).get_json()
+    assert preview["results"][0]["start"] == "18:05"
+    client.post(f"/groups/{group_id}/plans/create", data=fields)
+    plan = database.plans.find_one({"title": "Dinner"})
+    assert plan["matches"][0]["start_time"] == preview["results"][0]["start"]
+
+    database.groups.update_one({"_id": group_id}, {"$push": {"member_ids": second}})
+    edit_preview = client.post(f"/groups/{group_id}/schedule-preview", data={
+        **fields, "plan_id": str(plan["_id"]),
+    }).get_json()
+    assert edit_preview["results"][0]["group_size"] == 1
+    assert edit_preview["results"][0]["start"] == "18:05"
+    client.post(f"/plans/{plan['_id']}/find-times")
+    regenerated = database.plans.find_one({"_id": plan["_id"]})
+    assert regenerated["matches"][0]["total_members"] == 1
+    assert regenerated["matches"][0]["start_time"] == edit_preview["results"][0]["start"]
+
+
+def test_plan_generation_excludes_existing_scheduled_plan(app_and_db):
+    app, database = app_and_db
+    account_id = database.accounts.insert_one({"username": "alex"}).inserted_id
+    member_id = database.users.insert_one({
+        "display_name": "Alex", "normalized_name": "alex", "linked_account_id": account_id,
+    }).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    add_preview_availability(database, member_id, "18:00", "20:00")
+    make_plan(
+        database, group_id, status="scheduled", invited_member_ids=[member_id],
+        scheduled_start=datetime(2026, 10, 23, 18, 30),
+        scheduled_end=datetime(2026, 10, 23, 19, 0),
+    )
+    response = app.test_client().post(f"/groups/{group_id}/schedule-preview", data={
+        "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "60", "minimum_attendance": "1",
+        "earliest_time": "18:00", "latest_time": "20:00",
+    })
+    assert response.status_code == 200
+    assert response.get_json()["results"][0]["start"] == "19:00"
+
+
+def test_scheduled_conflicts_preserve_all_five_linked_participants(app_and_db):
+    app, database = app_and_db
+    member_ids = []
+    for index in range(5):
+        account_id = database.accounts.insert_one({"username": f"member-{index}"}).inserted_id
+        member_id = database.users.insert_one({
+            "display_name": f"Member {index}", "normalized_name": f"member-{index}",
+            "linked_account_id": account_id,
+        }).inserted_id
+        member_ids.append(member_id)
+        add_preview_availability(database, member_id, "18:00", "21:00")
+    group_id = make_group(database, member_ids=member_ids)
+    make_plan(
+        database, group_id, title="Existing commitment", status="scheduled",
+        invited_member_ids=[member_ids[0]],
+        scheduled_start=datetime(2026, 10, 23, 18),
+        scheduled_end=datetime(2026, 10, 23, 19),
+    )
+    fields = {
+        "title": "Five-person plan", "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "60", "minimum_attendance": "5",
+        "earliest_time": "18:00", "latest_time": "21:00",
+    }
+    client = app.test_client()
+    response = client.post(f"/groups/{group_id}/schedule-preview", data=fields)
+    assert response.status_code == 200
+    best = response.get_json()["results"][0]
+    assert (best["start"], best["attendance"], best["group_size"]) == ("19:00", 5, 5)
+
+    lower_minimum = client.post(f"/groups/{group_id}/schedule-preview", data={
+        **fields, "minimum_attendance": "4",
+    }).get_json()
+    overlapping = next(item for item in lower_minimum["results"] if item["start"] == "18:00")
+    assert (overlapping["attendance"], overlapping["group_size"]) == (4, 5)
+
+    assert client.post(f"/groups/{group_id}/plans/create", data=fields).status_code == 302
+    plan = database.plans.find_one({"title": fields["title"]})
+    assert plan["invited_member_ids"] == member_ids
+    assert plan["matches"][0]["total_members"] == 5
+    assert set(plan["matches"][0]["available_member_ids"]) == {str(value) for value in member_ids}
+
+    assert client.post(f"/plans/{plan['_id']}/find-times").status_code == 302
+    regenerated = database.plans.find_one({"_id": plan["_id"]})
+    assert regenerated["matches"] == plan["matches"]
 
 
 def test_plan_creation_and_opening_generate_matches_automatically(app_and_db):

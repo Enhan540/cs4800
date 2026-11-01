@@ -1269,6 +1269,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await response.json(); if (thisRequest !== requestNumber) return;
       if (!data.success) { resultsContainer.replaceChildren(); message.textContent = data.errors?.[0] || "Enter valid scheduling requirements."; return; }
       renderResults(data.results);
+      if (data.calendar_warnings?.length) message.textContent = data.calendar_warnings.join(" ");
     } catch (_error) { if (thisRequest === requestNumber) { resultsContainer.replaceChildren(); message.textContent = "Preview is temporarily unavailable. You can still save the plan."; } }
   };
   watchedNames.forEach((name) => { const field = planForm.elements[name]; if (field) field.addEventListener("input", () => { window.clearTimeout(timer); timer = window.setTimeout(requestPreview, 400); }); });

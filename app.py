@@ -55,6 +55,20 @@ CALENDAR_FRESHNESS_SECONDS = {
     "view": 5 * 60,
     "scheduling": 60,
 }
+GOOGLE_FREEBUSY_CHUNK_DAYS = 30
+
+
+def aware_utc(value):
+    """MongoDB's default BSON datetimes are naive values representing UTC."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+class CalendarUnavailableError(ValueError):
+    pass
 
 
 class Account(UserMixin):
@@ -150,8 +164,12 @@ def create_app(database_override=None):
             database.google_oauth_states.create_index("expires_at", expireAfterSeconds=0)
             database.google_link_states.create_index("token_hash", unique=True)
             database.google_link_states.create_index("expires_at", expireAfterSeconds=0)
+            calendar_indexes = database.calendar_connections.index_information()
+            if "account_id_1_provider_1" in calendar_indexes:
+                database.calendar_connections.drop_index("account_id_1_provider_1")
             database.calendar_connections.create_index(
-                [("account_id", ASCENDING), ("provider", ASCENDING)], unique=True
+                [("account_id", ASCENDING), ("provider", ASCENDING), ("source_key", ASCENDING)],
+                unique=True,
             )
             database.availability.create_index(
                 [("user_id", ASCENDING), ("day_order", ASCENDING), ("start_time", ASCENDING)]
@@ -477,7 +495,9 @@ def create_app(database_override=None):
         busy_by_account = {}
         if account_ids:
             for connection in db.calendar_connections.find(
-                {"account_id": {"$in": account_ids}, "sync_status": "connected"},
+                {"account_id": {"$in": account_ids}, "$or": [
+                    {"sync_status": "connected"}, {"last_synced_at": {"$exists": True}},
+                ]},
                 {"account_id": 1, "busy_intervals": 1},
             ):
                 busy_by_account.setdefault(connection["account_id"], []).extend(
@@ -583,8 +603,10 @@ def create_app(database_override=None):
         return values, errors
 
     def calculate_matches(group, values, exclude_plan_id=None):
-        ensure_group_calendars_fresh(group, "scheduling")
-        member_ids = group.get("member_ids", [])
+        member_ids = plan_member_ids(values, group)
+        values["_calendar_warnings"] = ensure_group_calendars_fresh(
+            group, "scheduling", values["start_date"], values["end_date"], member_ids=member_ids
+        )
         availability_records = list(
             require_database().availability.find({"user_id": {"$in": member_ids}})
         )
@@ -628,20 +650,23 @@ def create_app(database_override=None):
                     {"_id": scheduled_plan["group_id"]}, {"member_ids": 1}
                 ) or {}
                 scheduled_member_ids = plan_member_ids(scheduled_plan, scheduled_group)
-                for account_id, member_ids in member_ids_by_account.items():
+                for account_id, account_member_ids in member_ids_by_account.items():
                     scheduled_member_id = next(
-                        (member_id for member_id in scheduled_member_ids if member_id in member_ids),
+                        (member_id for member_id in scheduled_member_ids if member_id in account_member_ids),
                         None,
                     )
                     if not scheduled_member_id:
                         continue
                     interval = effective_plan_interval(scheduled_plan, scheduled_member_id)
                     if interval:
+                        local_zone = ZoneInfo(app.config["APP_TIMEZONE"])
+                        busy_start = interval["start"].replace(tzinfo=local_zone).astimezone(timezone.utc)
+                        busy_end = interval["end"].replace(tzinfo=local_zone).astimezone(timezone.utc)
                         for target_member_id in account_by_member:
                             if account_by_member[target_member_id] == account_id:
                                 busy_intervals_by_member.setdefault(target_member_id, []).append({
-                                    "start": interval["start"],
-                                    "end": interval["end"],
+                                    "start": busy_start,
+                                    "end": busy_end,
                                 })
         return find_matching_times(
             member_ids=member_ids,
@@ -671,6 +696,7 @@ def create_app(database_override=None):
     def refresh_plan_matches(plan, group):
         matches = calculate_matches(group, plan, exclude_plan_id=plan["_id"])
         metadata = match_metadata(matches)
+        metadata["calendar_warnings"] = plan.pop("_calendar_warnings", [])
         require_database().plans.update_one(
             {"_id": plan["_id"]}, {"$set": metadata}
         )
@@ -992,144 +1018,167 @@ def create_app(database_override=None):
         except (InvalidToken, ValueError, TypeError, json.JSONDecodeError):
             raise ValueError("Saved calendar credentials are no longer available.")
 
-    def sync_calendar_connection(connection):
+    def calendar_window(start_date=None, end_date=None):
+        zone = ZoneInfo(app.config["APP_TIMEZONE"])
+        if start_date and end_date:
+            start_day, end_day = parse_date(start_date), parse_date(end_date)
+        else:
+            start_day = utc_now().astimezone(zone).date()
+            end_day = start_day + timedelta(days=29)
+        start = datetime.combine(start_day, datetime.min.time(), zone).astimezone(timezone.utc)
+        end = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc)
+        return start, end
+
+    def cache_covers(connection, start, end):
+        cached_start = aware_utc(as_datetime(connection.get("cache_start")))
+        cached_end = aware_utc(as_datetime(connection.get("cache_end")))
+        return bool(connection.get("last_synced_at") and cached_start and cached_end
+                    and cached_start <= start and cached_end >= end)
+
+    def sync_calendar_connection(connection, start=None, end=None):
         db = require_database()
+        start, end = (start, end) if start and end else calendar_window()
         try:
             secret = decrypt_calendar_secret(connection["secret_ciphertext"])
             if connection["provider"] == "ical":
                 intervals = parse_ical_busy_intervals(
                     fetch_calendar_url(secret["url"]),
+                    start=start, end=end,
                     default_timezone=ZoneInfo(app.config["APP_TIMEZONE"]),
                 )
             elif connection["provider"] == "google":
                 token = secret.get("access_token")
                 if not token:
                     raise ValueError("Google Calendar authorization needs to be reconnected.")
-                now = utc_now()
-                response = requests.post(
-                    "https://www.googleapis.com/calendar/v3/freeBusy",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={
-                        "timeMin": now.isoformat(),
-                        # Google FreeBusy enforces a strict maximum range;
-                        # leave a one-day margin below one year.
-                        "timeMax": (now + timedelta(days=364)).isoformat(),
-                        "timeZone": app.config["APP_TIMEZONE"],
-                        "items": [{"id": "primary"}],
-                    },
-                    timeout=(3.05, 15),
-                )
-                if response.status_code == 401 and secret.get("refresh_token"):
-                    refresh = requests.post(
-                        "https://oauth2.googleapis.com/token",
-                        data={
-                            "client_id": app.config["GOOGLE_CLIENT_ID"],
-                            "client_secret": app.config["GOOGLE_CLIENT_SECRET"],
-                            "refresh_token": secret["refresh_token"],
-                            "grant_type": "refresh_token",
-                        },
-                        timeout=(3.05, 15),
-                    )
-                    refresh.raise_for_status()
-                    token = refresh.json().get("access_token")
-                    if not token:
-                        raise ValueError("Google Calendar authorization needs to be reconnected.")
-                    secret["access_token"] = token
-                    db.calendar_connections.update_one(
-                        {"_id": connection["_id"]},
-                        {"$set": {"secret_ciphertext": encrypt_calendar_secret(secret)}},
-                    )
+                intervals = []
+                chunk_start = start
+                while chunk_start < end:
+                    chunk_end = min(chunk_start + timedelta(days=GOOGLE_FREEBUSY_CHUNK_DAYS), end)
+                    payload = {
+                        "timeMin": chunk_start.isoformat(), "timeMax": chunk_end.isoformat(),
+                        "timeZone": app.config["APP_TIMEZONE"], "items": [{"id": "primary"}],
+                    }
                     response = requests.post(
                         "https://www.googleapis.com/calendar/v3/freeBusy",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={
-                            "timeMin": now.isoformat(),
-                            "timeMax": (now + timedelta(days=364)).isoformat(),
-                            "timeZone": app.config["APP_TIMEZONE"],
-                            "items": [{"id": "primary"}],
-                        },
+                        headers={"Authorization": f"Bearer {token}"}, json=payload,
                         timeout=(3.05, 15),
                     )
-                if not response.ok:
-                    app.logger.error(
-                        "Google Calendar FreeBusy request failed: status=%s body=%s",
-                        response.status_code,
-                        response.text[:500],
+                    if response.status_code == 401 and secret.get("refresh_token"):
+                        refresh = requests.post(
+                            "https://oauth2.googleapis.com/token",
+                            data={
+                                "client_id": app.config["GOOGLE_CLIENT_ID"],
+                                "client_secret": app.config["GOOGLE_CLIENT_SECRET"],
+                                "refresh_token": secret["refresh_token"],
+                                "grant_type": "refresh_token",
+                            }, timeout=(3.05, 15),
+                        )
+                        refresh.raise_for_status()
+                        token = refresh.json().get("access_token")
+                        if not token:
+                            raise ValueError("Google Calendar authorization needs to be reconnected.")
+                        secret["access_token"] = token
+                        db.calendar_connections.update_one(
+                            {"_id": connection["_id"]},
+                            {"$set": {"secret_ciphertext": encrypt_calendar_secret(secret)}},
+                        )
+                        response = requests.post(
+                            "https://www.googleapis.com/calendar/v3/freeBusy",
+                            headers={"Authorization": f"Bearer {token}"}, json=payload,
+                            timeout=(3.05, 15),
+                        )
+                    response.raise_for_status()
+                    calendar_result = response.json().get("calendars", {}).get("primary")
+                    if not calendar_result or calendar_result.get("errors"):
+                        raise ValueError("Google Calendar did not return primary calendar availability.")
+                    intervals.extend(
+                        normalized_interval(item["start"], item["end"])
+                        for item in calendar_result.get("busy", [])
                     )
-                response.raise_for_status()
-                intervals = [
-                    normalized_interval(item["start"], item["end"])
-                    for item in response.json().get("calendars", {}).get("primary", {}).get("busy", [])
-                ]
+                    chunk_start = chunk_end
             else:
                 raise ValueError("Unsupported calendar provider.")
             db.calendar_connections.update_one(
                 {"_id": connection["_id"]},
                 {"$set": {
                     "busy_intervals": intervals,
+                    "cache_start": start, "cache_end": end,
                     "last_synced_at": utc_now(),
                     "sync_status": "connected",
                     "sync_error": None,
                 }},
             )
             return True
-        except Exception:
-            app.logger.exception("Calendar sync failed")
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            app.logger.warning(
+                "Calendar sync failed: provider=%s category=%s status=%s",
+                connection.get("provider"), type(exc).__name__, status,
+            )
             db.calendar_connections.update_one(
                 {"_id": connection["_id"]},
                 {"$set": {"sync_status": "error", "sync_error": "Calendar could not be synced."}},
             )
             return False
 
-    def ensure_calendar_fresh(account_id, mode="view", force=False):
-        """Refresh an account calendar only when its cached data is stale."""
+    def ensure_calendar_fresh(account_id, mode="view", force=False, start=None, end=None):
+        """Refresh every connection; never treat an uncovered range as free."""
         if not account_id:
-            return True
+            return []
         db = require_database()
-        connection = db.calendar_connections.find_one({
-            "account_id": account_id,
-            "provider": {"$in": ["ical", "google"]},
-        })
-        if not connection:
-            return True
+        start, end = (start, end) if start and end else calendar_window()
+        warnings = []
         threshold = timedelta(seconds=CALENDAR_FRESHNESS_SECONDS.get(
             mode, CALENDAR_FRESHNESS_SECONDS["view"]
         ))
-        last_synced = as_datetime(connection.get("last_synced_at"))
-        if (
-            not force
-            and last_synced
-            and utc_now() - last_synced <= threshold
-            and connection.get("sync_status") == "connected"
-        ):
-            return True
-
-        # A MongoDB lease avoids duplicate fetches across serverless instances.
-        lease = db.calendar_connections.update_one(
-            {"_id": connection["_id"], "sync_in_progress": {"$ne": True}},
-            {"$set": {"sync_in_progress": True, "sync_started_at": utc_now()}},
-        )
-        if not lease.modified_count:
-            return False
-        try:
-            return sync_calendar_connection(connection)
-        finally:
-            db.calendar_connections.update_one(
-                {"_id": connection["_id"]},
-                {"$unset": {"sync_in_progress": "", "sync_started_at": ""}},
+        for connection in db.calendar_connections.find({
+            "account_id": account_id, "provider": {"$in": ["ical", "google"]},
+        }):
+            covered = cache_covers(connection, start, end)
+            last_synced = aware_utc(as_datetime(connection.get("last_synced_at")))
+            if (not force and covered and last_synced and
+                    utc_now() - last_synced <= threshold and
+                    connection.get("sync_status") == "connected"):
+                continue
+            lease = db.calendar_connections.update_one(
+                {"_id": connection["_id"], "$or": [
+                    {"sync_in_progress": {"$ne": True}},
+                    {"sync_started_at": {"$exists": False}},
+                    {"sync_started_at": {"$lt": utc_now() - timedelta(minutes=2)}},
+                ]},
+                {"$set": {"sync_in_progress": True, "sync_started_at": utc_now()}},
             )
+            synced = False
+            if lease.modified_count:
+                try:
+                    synced = sync_calendar_connection(connection, start, end)
+                finally:
+                    db.calendar_connections.update_one(
+                        {"_id": connection["_id"]},
+                        {"$unset": {"sync_in_progress": "", "sync_started_at": ""}},
+                    )
+            if not synced:
+                if mode == "scheduling" and not covered:
+                    raise CalendarUnavailableError(
+                        "A connected calendar could not sync for these dates. Sync or disconnect it before scheduling."
+                    )
+                warnings.append("A connected calendar could not refresh; using its last successful busy times.")
+        return warnings
 
-    def ensure_group_calendars_fresh(group, mode="view"):
+    def ensure_group_calendars_fresh(group, mode="view", start_date=None, end_date=None, member_ids=None):
         db = require_database()
-        failures = []
+        start, end = calendar_window(start_date, end_date)
+        warnings = []
+        seen_accounts = set()
         for member in db.users.find(
-            {"_id": {"$in": group.get("member_ids", [])}},
+            {"_id": {"$in": member_ids if member_ids is not None else group.get("member_ids", [])}},
             {"linked_account_id": 1, "account_id": 1},
         ):
             account_id = member.get("linked_account_id") or member.get("account_id")
-            if account_id and not ensure_calendar_fresh(account_id, mode):
-                failures.append(account_id)
-        return failures
+            if account_id and account_id not in seen_accounts:
+                seen_accounts.add(account_id)
+                warnings.extend(ensure_calendar_fresh(account_id, mode, start=start, end=end))
+        return list(dict.fromkeys(warnings))
 
     def available_google_username(profile, db):
         # Use the email local-part as a starting suggestion.  The provider's
@@ -1600,6 +1649,7 @@ def create_app(database_override=None):
             return redirect(url_for("account"))
         state = secrets.token_urlsafe(32)
         session["google_calendar_oauth_state"] = state
+        session["google_calendar_oauth_account_id"] = str(current_account_id())
         redirect_uri = app.config["GOOGLE_CALENDAR_REDIRECT_URI"] or url_for(
             "google_calendar_callback", _external=True
         )
@@ -1614,8 +1664,11 @@ def create_app(database_override=None):
     @login_required
     def google_calendar_callback():
         expected_state = session.pop("google_calendar_oauth_state", None)
+        expected_account_id = session.pop("google_calendar_oauth_account_id", None)
         received_state = request.args.get("state", "")
-        if not expected_state or not received_state or not secrets.compare_digest(expected_state, received_state):
+        if (not expected_state or not received_state or
+                not secrets.compare_digest(expected_state, received_state) or
+                expected_account_id != str(current_account_id())):
             flash("Google Calendar connection could not be verified.", "error")
             return redirect(url_for("account"))
         if request.args.get("error"):
@@ -1637,6 +1690,16 @@ def create_app(database_override=None):
             return redirect(url_for("account"))
         now = utc_now()
         db = require_database()
+        existing = db.calendar_connections.find_one(
+            {"account_id": current_account_id(), "provider": "google"}
+        )
+        if existing and not secret.get("refresh_token"):
+            try:
+                secret["refresh_token"] = decrypt_calendar_secret(
+                    existing["secret_ciphertext"]
+                ).get("refresh_token")
+            except (KeyError, ValueError):
+                pass
         db.calendar_connections.update_one(
             {"account_id": current_account_id(), "provider": "google"},
             {"$set": {
@@ -1644,7 +1707,6 @@ def create_app(database_override=None):
                 "provider": "google",
                 "secret_ciphertext": encrypt_calendar_secret(secret),
                 "sync_status": "pending",
-                "busy_intervals": [],
                 "updated_at": now,
             }, "$setOnInsert": {"created_at": now}},
             upsert=True,
@@ -1661,24 +1723,43 @@ def create_app(database_override=None):
     @app.post("/account/calendars/ical")
     @login_required
     def connect_ical_calendar():
-        raw_url = request.form.get("calendar_url", "")
+        raw_url = request.form.get("calendar_url", "").strip()
+        label = request.form.get("calendar_name", "").strip()[:80] or "iCal calendar"
         try:
             payload = fetch_calendar_url(raw_url)
+            start, end = calendar_window()
             intervals = parse_ical_busy_intervals(
-                payload, default_timezone=ZoneInfo(app.config["APP_TIMEZONE"])
+                payload, start=start, end=end,
+                default_timezone=ZoneInfo(app.config["APP_TIMEZONE"])
             )
         except (ValueError, requests.RequestException):
             flash("That calendar URL could not be safely connected.", "error")
             return redirect(url_for("account"))
         now = utc_now()
         db = require_database()
+        source_key = hashlib.sha256(raw_url.encode("utf-8")).hexdigest()
+        selector = {"account_id": current_account_id(), "provider": "ical", "source_key": source_key}
+        if not db.calendar_connections.find_one(selector):
+            for legacy in db.calendar_connections.find({
+                "account_id": current_account_id(), "provider": "ical",
+                "source_key": {"$exists": False},
+            }):
+                try:
+                    if decrypt_calendar_secret(legacy["secret_ciphertext"]).get("url") == raw_url:
+                        selector = {"_id": legacy["_id"], "account_id": current_account_id()}
+                        break
+                except (KeyError, ValueError):
+                    continue
         db.calendar_connections.update_one(
-            {"account_id": current_account_id(), "provider": "ical"},
+            selector,
             {"$set": {
                 "account_id": current_account_id(),
                 "provider": "ical",
+                "source_key": source_key,
+                "display_name": label,
                 "secret_ciphertext": encrypt_calendar_secret({"url": raw_url}),
                 "busy_intervals": intervals,
+                "cache_start": start, "cache_end": end,
                 "sync_status": "connected",
                 "last_synced_at": now,
                 "sync_error": None,
@@ -2953,7 +3034,9 @@ def create_app(database_override=None):
                 refresh_plan_matches(values, group)
             except ValueError as exc:
                 app.logger.warning("Unable to generate initial matches: %s", exc)
-            flash("Plan created. The best available times are ready to review.", "success")
+                flash(str(exc), "error")
+            else:
+                flash("Plan created. The best available times are ready to review.", "success")
             return redirect(url_for("plan_detail", plan_id=result.inserted_id))
         return render_template("plan_create.html", group=group)
 
@@ -2962,13 +3045,25 @@ def create_app(database_override=None):
     def schedule_preview(group_id):
         group = get_group(group_id)
         require_group_permission(group, "manage_plans")
+        preview_plan = None
+        preview_plan_id = request.form.get("plan_id", "").strip()
+        if preview_plan_id:
+            preview_plan = require_database().plans.find_one({
+                "_id": object_id(preview_plan_id), "group_id": group["_id"],
+            })
+            if not preview_plan:
+                abort(404)
+        member_ids = plan_member_ids(preview_plan, group) if preview_plan else group.get("member_ids", [])
         values, errors = validate_plan_form(
-            request.form, len(group.get("member_ids", [])), require_title=False
+            request.form, len(member_ids), require_title=False
         )
         if errors:
             return jsonify({"success": False, "errors": errors, "results": []}), 400
         try:
-            matches = calculate_matches(group, values)
+            values["invited_member_ids"] = list(member_ids)
+            matches = calculate_matches(
+                group, values, exclude_plan_id=preview_plan["_id"] if preview_plan else None
+            )
         except ValueError as exc:
             return jsonify({"success": False, "errors": [str(exc)], "results": []}), 400
         results = [
@@ -2984,7 +3079,8 @@ def create_app(database_override=None):
             }
             for match in matches
         ]
-        return jsonify({"success": True, "results": results})
+        return jsonify({"success": True, "results": results,
+                        "calendar_warnings": values.pop("_calendar_warnings", [])})
 
     @app.get("/plans/<plan_id>")
     @login_required
@@ -3085,7 +3181,14 @@ def create_app(database_override=None):
         if not group:
             abort(404)
         require_group_permission(group, "manage_plans")
-        ensure_group_calendars_fresh(group, "scheduling")
+        try:
+            ensure_group_calendars_fresh(
+                group, "scheduling", plan["start_date"], plan["end_date"],
+                member_ids=plan_member_ids(plan, group),
+            )
+        except CalendarUnavailableError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("plan_detail", plan_id=plan["_id"]))
         try:
             match_index = int(request.form.get("match_index", ""))
             if match_index < 0:
@@ -3093,6 +3196,26 @@ def create_app(database_override=None):
             match = plan.get("matches", [])[match_index]
         except (TypeError, ValueError, IndexError):
             abort(404)
+
+        participant_ids = plan_member_ids(plan, group)
+        participants = list(db.users.find({"_id": {"$in": participant_ids}},
+                                          {"linked_account_id": 1, "account_id": 1}))
+        account_ids = [account_id for member in participants
+                       if (account_id := member.get("linked_account_id") or member.get("account_id"))]
+        if db.calendar_connections.count_documents({"account_id": {"$in": account_ids}}):
+            try:
+                current_matches = calculate_matches(group, plan, exclude_plan_id=plan["_id"])
+            except CalendarUnavailableError as exc:
+                flash(str(exc), "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            selected_key = (match.get("date"), match.get("start_time"), match.get("end_time"))
+            current = next((item for item in current_matches if
+                            (item["date"], item["start_time"], item["end_time"]) == selected_key), None)
+            if current is None or current["attendance_count"] < plan["minimum_attendance"]:
+                refresh_plan_matches(plan, group)
+                flash("That time is no longer available. Review the updated options.", "error")
+                return redirect(url_for("plan_detail", plan_id=plan["_id"]))
+            match = current
 
         is_exact = match.get("is_exact", True)
         if not is_exact and request.form.get("confirm_shorter") != "yes":
@@ -3294,19 +3417,16 @@ def create_app(database_override=None):
             abort(404)
         require_group_permission(group, "manage_plans")
         was_scheduled = has_confirmed_schedule(plan)
-        if was_scheduled:
-            db.plans.update_one(
-                {"_id": plan["_id"]},
-                {"$set": {"status": "planning"}, "$unset": clear_scheduled_fields()},
-            )
-            plan["status"] = "planning"
-            for field in clear_scheduled_fields():
-                plan.pop(field, None)
         try:
             matches = refresh_plan_matches(plan, group)
         except ValueError as exc:
             flash(str(exc), "error")
             return redirect(url_for("plan_detail", plan_id=plan_id))
+        if was_scheduled:
+            db.plans.update_one(
+                {"_id": plan["_id"]},
+                {"$set": {"status": "planning"}, "$unset": clear_scheduled_fields()},
+            )
         if matches and matches[0].get("is_exact"):
             flash(f"Found {len(matches)} matching time options.", "success")
         elif matches:

@@ -98,17 +98,15 @@ def _effective_blocks(member_id, current, intervals, busy_intervals_by_member, t
 
 
 def _exact_matches_for_day(
-    current, members, intervals, earliest, latest, duration_minutes, minimum_attendance, increment_minutes,
-    busy_intervals_by_member, timezone_name,
+    current, members, effective_by_member, earliest, latest, duration_minutes, minimum_attendance,
 ):
-    day = current.strftime("%A")
     latest_start = latest - duration_minutes
     if latest_start < earliest:
         return []
 
-    candidate_starts = set(range(earliest, latest_start + 1, increment_minutes))
+    candidate_starts = {earliest}
     for member_id in members:
-        for block_start, _block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name):
+        for block_start, _block_end in effective_by_member[member_id]:
             if earliest <= block_start <= latest_start:
                 candidate_starts.add(block_start)
 
@@ -120,7 +118,7 @@ def _exact_matches_for_day(
             for member_id in members
             if any(
                 block_start <= candidate_start and block_end >= candidate_end
-                for block_start, block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name)
+                for block_start, block_end in effective_by_member[member_id]
             )
         ]
         if len(available_ids) >= minimum_attendance:
@@ -133,14 +131,12 @@ def _exact_matches_for_day(
 
 
 def _alternative_matches_for_day(
-    current, members, intervals, earliest, latest, duration_minutes, minimum_attendance,
-    busy_intervals_by_member, timezone_name,
+    current, members, effective_by_member, earliest, latest, duration_minutes, minimum_attendance,
 ):
     """Find maximal shorter windows for stable attendee sets on one weekday."""
-    day = current.strftime("%A")
     candidate_starts = {earliest}
     for member_id in members:
-        for block_start, _block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name):
+        for block_start, _block_end in effective_by_member[member_id]:
             if earliest <= block_start < latest:
                 candidate_starts.add(block_start)
 
@@ -151,7 +147,7 @@ def _alternative_matches_for_day(
         for member_id in members:
             ends = [
                 min(block_end, latest)
-                for block_start, block_end in _effective_blocks(member_id, current, intervals, busy_intervals_by_member, timezone_name)
+                for block_start, block_end in effective_by_member[member_id]
                 if block_start <= candidate_start < block_end and min(block_end, latest) > candidate_start
             ]
             if ends:
@@ -207,28 +203,31 @@ def find_matching_times(
     alternatives = []
     current = start
     while current <= end:
+        effective_by_member = {
+            member_id: _effective_blocks(
+                member_id, current, intervals, busy_intervals_by_member, timezone_name
+            )
+            for member_id in members
+        }
         exact_matches.extend(
             _exact_matches_for_day(
-                current, members, intervals, earliest, latest, duration_minutes,
-                minimum_attendance, increment_minutes, busy_intervals_by_member, timezone_name,
+                current, members, effective_by_member, earliest, latest, duration_minutes,
+                minimum_attendance,
             )
         )
-        alternatives.extend(
-            _alternative_matches_for_day(
-                current, members, intervals, earliest, latest, duration_minutes, minimum_attendance,
-                busy_intervals_by_member, timezone_name,
+        if not exact_matches:
+            alternatives.extend(
+                _alternative_matches_for_day(
+                    current, members, effective_by_member, earliest, latest,
+                    duration_minutes, minimum_attendance,
+                )
             )
-        )
         current += timedelta(days=1)
 
     results = exact_matches if exact_matches else alternatives
-    results.sort(
-        key=lambda match: (
-            not match["is_exact"],
-            -match["attendance_count"],
-            -match["available_duration_minutes"],
-            match["date"],
-            match["start_time"],
-        )
-    )
+    results.sort(key=lambda match: (
+        -match["attendance_count"],
+        -match["available_duration_minutes"] if not match["is_exact"] else 0,
+        match["date"], match["start_time"],
+    ))
     return results[:max_results]
