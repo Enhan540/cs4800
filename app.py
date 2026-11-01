@@ -584,7 +584,7 @@ def create_app(database_override=None):
 
     def calculate_matches(group, values, exclude_plan_id=None):
         ensure_group_calendars_fresh(group, "scheduling")
-        member_ids = group.get("member_ids", [])
+        member_ids = plan_member_ids(values, group)
         availability_records = list(
             require_database().availability.find({"user_id": {"$in": member_ids}})
         )
@@ -637,11 +637,14 @@ def create_app(database_override=None):
                         continue
                     interval = effective_plan_interval(scheduled_plan, scheduled_member_id)
                     if interval:
+                        local_zone = ZoneInfo(app.config["APP_TIMEZONE"])
+                        busy_start = interval["start"].replace(tzinfo=local_zone).astimezone(timezone.utc)
+                        busy_end = interval["end"].replace(tzinfo=local_zone).astimezone(timezone.utc)
                         for target_member_id in account_by_member:
                             if account_by_member[target_member_id] == account_id:
                                 busy_intervals_by_member.setdefault(target_member_id, []).append({
-                                    "start": interval["start"],
-                                    "end": interval["end"],
+                                    "start": busy_start,
+                                    "end": busy_end,
                                 })
         return find_matching_times(
             member_ids=member_ids,
@@ -2962,13 +2965,25 @@ def create_app(database_override=None):
     def schedule_preview(group_id):
         group = get_group(group_id)
         require_group_permission(group, "manage_plans")
+        preview_plan = None
+        preview_plan_id = request.form.get("plan_id", "").strip()
+        if preview_plan_id:
+            preview_plan = require_database().plans.find_one({
+                "_id": object_id(preview_plan_id), "group_id": group["_id"],
+            })
+            if not preview_plan:
+                abort(404)
+        member_ids = plan_member_ids(preview_plan, group) if preview_plan else group.get("member_ids", [])
         values, errors = validate_plan_form(
-            request.form, len(group.get("member_ids", [])), require_title=False
+            request.form, len(member_ids), require_title=False
         )
         if errors:
             return jsonify({"success": False, "errors": errors, "results": []}), 400
         try:
-            matches = calculate_matches(group, values)
+            values["invited_member_ids"] = list(member_ids)
+            matches = calculate_matches(
+                group, values, exclude_plan_id=preview_plan["_id"] if preview_plan else None
+            )
         except ValueError as exc:
             return jsonify({"success": False, "errors": [str(exc)], "results": []}), 400
         results = [
