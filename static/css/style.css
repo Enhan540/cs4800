@@ -689,3 +689,5 @@ button.day-window-card:hover, button.day-window-card:focus-visible { border-colo
   html { scroll-behavior: auto; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+.plan-builder-form [aria-invalid="true"] { border-color: var(--danger); outline-color: var(--danger); }

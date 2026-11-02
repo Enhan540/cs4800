@@ -1244,10 +1244,38 @@ document.addEventListener("DOMContentLoaded", () => {
   const resultsContainer = planForm.querySelector("[data-preview-results]");
   const watchedNames = ["start_date", "end_date", "duration_minutes", "minimum_attendance", "earliest_time", "latest_time"];
   let timer; let requestNumber = 0;
-  const renderResults = (results) => {
+  const clearFieldErrors = () => watchedNames.forEach((name) => planForm.elements[name]?.removeAttribute("aria-invalid"));
+  const showIssue = (issue) => {
     resultsContainer.replaceChildren();
-    if (!results.length) { message.textContent = "No options currently meet these requirements."; return; }
-    message.textContent = "Preview only — save the plan before scheduling a time.";
+    message.textContent = issue.message;
+    if (issue.field && planForm.elements[issue.field]) planForm.elements[issue.field].setAttribute("aria-invalid", "true");
+  };
+  const previewIssue = () => {
+    const fields = planForm.elements;
+    const required = ["start_date", "end_date", "duration_minutes", "minimum_attendance"];
+    if (required.some((name) => !fields[name]?.value)) return {message: "Complete the scheduling fields to preview matching times."};
+    const duration = Number(fields.duration_minutes.value);
+    const minimum = Number(fields.minimum_attendance.value);
+    if (!Number.isInteger(duration) || duration < 1) return {field: "duration_minutes", message: "Meeting duration must be a positive whole number."};
+    if (!Number.isInteger(minimum) || minimum < 1) return {field: "minimum_attendance", message: "Minimum attendance must be at least one."};
+    if (minimum > Number(fields.minimum_attendance.max)) return {field: "minimum_attendance", message: "Minimum attendance cannot exceed the group size."};
+    if (fields.end_date.value < fields.start_date.value) return {field: "end_date", message: "End date must be on or after the start date."};
+    const days = (Date.parse(`${fields.end_date.value}T00:00:00Z`) - Date.parse(`${fields.start_date.value}T00:00:00Z`)) / 86400000;
+    if (days > 366) return {field: "end_date", message: "Date range must be one year or less."};
+    if (fields.earliest_time.value && fields.latest_time.value && fields.latest_time.value <= fields.earliest_time.value) return {field: "latest_time", message: "Latest allowed time must be later than earliest allowed time."};
+    return null;
+  };
+  const renderResults = (results, diagnostic) => {
+    resultsContainer.replaceChildren();
+    if (!results.length) {
+      if (diagnostic?.reason === "attendance_unmet") message.textContent = `The minimum is ${diagnostic.requested_attendance}/${diagnostic.total_members}, but at most ${diagnostic.maximum_attendance} can attend for the requested duration. Try lowering the minimum to ${diagnostic.maximum_attendance}, widening the dates, or adding availability. You can still save this plan.`;
+      else if (diagnostic?.reason === "duration_unmet") message.textContent = `No full-duration time is available. A shorter ${diagnostic.best_shorter_minutes}-minute window can fit ${diagnostic.shorter_attendance}/${diagnostic.total_members} members. Try shortening the duration, widening the dates, or adding availability. You can still save this plan.`;
+      else message.textContent = "No availability overlaps these requirements. Try changing the dates or allowed times, or adding availability. You can still save this plan.";
+      return;
+    }
+    message.textContent = diagnostic?.reason === "duration_unmet"
+      ? `No full-duration time meets these requirements. Showing shorter options; the best is ${diagnostic.best_shorter_minutes} minutes with ${diagnostic.shorter_attendance}/${diagnostic.total_members} available.`
+      : "Preview only — save the plan before scheduling a time.";
     results.slice(0, 5).forEach((result, index) => {
       const card = document.createElement("article"); card.className = "preview-result";
       const title = document.createElement("strong"); title.textContent = `${result.day}, ${result.date}`;
@@ -1256,20 +1284,26 @@ document.addEventListener("DOMContentLoaded", () => {
       const explanation = document.createElement("span");
       const unavailable = result.group_size - result.attendance;
       explanation.textContent = unavailable ? `${unavailable} unavailable` : "Everyone available";
-      const badge = document.createElement("span"); badge.className = result.exact_match ? "preview-badge" : "preview-badge alternative"; badge.textContent = index === 0 ? "Best Match" : result.exact_match ? "Exact match" : `Shorter option · ${result.available_duration_minutes} min`;
+      const badge = document.createElement("span"); badge.className = result.exact_match ? "preview-badge" : "preview-badge alternative"; badge.textContent = index === 0 ? (result.exact_match ? "Best Match" : "Best shorter option") : result.exact_match ? "Exact match" : `Shorter option · ${result.available_duration_minutes} min`;
       card.append(title, time, attendance, explanation, badge); resultsContainer.append(card);
     });
   };
   const requestPreview = async () => {
-    const required = ["start_date", "end_date", "duration_minutes", "minimum_attendance"];
-    if (required.some((name) => !planForm.elements[name]?.value)) { resultsContainer.replaceChildren(); message.textContent = "Complete the scheduling fields to preview matching times."; return; }
-    const thisRequest = ++requestNumber; message.textContent = "Calculating best times…";
+    const thisRequest = ++requestNumber;
+    clearFieldErrors();
+    const issue = previewIssue();
+    if (issue) { showIssue(issue); return; }
+    message.textContent = "Calculating best times…";
     try {
       const response = await fetch(planForm.dataset.schedulePreviewUrl, { method: "POST", body: new URLSearchParams(new FormData(planForm)), headers: { "X-Requested-With": "fetch" } });
       const data = await response.json(); if (thisRequest !== requestNumber) return;
-      if (!data.success) { resultsContainer.replaceChildren(); message.textContent = data.errors?.[0] || "Enter valid scheduling requirements."; return; }
-      renderResults(data.results);
-      if (data.calendar_warnings?.length) message.textContent = data.calendar_warnings.join(" ");
+      if (!data.success) {
+        const firstField = Object.keys(data.field_errors || {})[0];
+        showIssue({field: firstField, message: data.field_errors?.[firstField] || data.errors?.[0] || "Enter valid scheduling requirements."});
+        return;
+      }
+      renderResults(data.results, data.diagnostic);
+      if (data.calendar_warnings?.length) message.textContent += " " + data.calendar_warnings.join(" ");
     } catch (_error) { if (thisRequest === requestNumber) { resultsContainer.replaceChildren(); message.textContent = "Preview is temporarily unavailable. You can still save the plan."; } }
   };
   watchedNames.forEach((name) => { const field = planForm.elements[name]; if (field) field.addEventListener("input", () => { window.clearTimeout(timer); timer = window.setTimeout(requestPreview, 400); }); });

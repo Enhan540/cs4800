@@ -1589,3 +1589,125 @@ def test_single_window_edit_rejects_invalid_range_without_writing(app_and_db):
     assert response.status_code == 302
     saved = database.availability.find_one({"_id": entry_id})
     assert (saved["start_time"], saved["end_time"]) == ("09:00", "10:00")
+
+
+def test_no_match_plan_saves_with_best_attendance_explanation(app_and_db, monkeypatch):
+    app, database = app_and_db
+    member_ids = [
+        database.users.insert_one({"display_name": f"Member {index}", "normalized_name": f"member {index}"}).inserted_id
+        for index in range(7)
+    ]
+    group_id = make_group(database, member_ids=member_ids)
+    for member_id in member_ids[:5]:
+        add_preview_availability(database, member_id, "18:00", "19:00")
+    for member_id in member_ids[5:]:
+        add_preview_availability(database, member_id, "20:00", "21:00")
+    fields = {
+        "title": "Large group", "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "30", "minimum_attendance": "7",
+    }
+    client = app.test_client()
+    preview = client.post(f"/groups/{group_id}/schedule-preview", data=fields)
+    assert preview.status_code == 200
+    assert preview.get_json()["results"] == []
+    assert preview.get_json()["diagnostic"] == {
+        "reason": "attendance_unmet", "requested_attendance": 7,
+        "total_members": 7, "maximum_attendance": 5,
+    }
+
+    created = client.post(f"/groups/{group_id}/plans/create", data=fields, follow_redirects=True)
+    plan = database.plans.find_one({"title": "Large group"})
+    assert created.status_code == 200
+    assert plan["minimum_attendance"] == 7
+    assert plan["matches"] == []
+    assert plan["match_diagnostic"] == preview.get_json()["diagnostic"]
+    assert b"Plan created. No times meet the current requirements yet." in created.data
+    assert b"at most 5 can attend" in created.data
+    assert b"Lower the minimum to 5" in created.data
+    assert b"Adjust plan" in created.data
+    assert b"Review group availability" in created.data
+
+    monkeypatch.setattr("app.find_matching_times", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("recomputed")))
+    assert client.get(f"/plans/{plan['_id']}").status_code == 200
+    monkeypatch.undo()
+    for member_id in member_ids[5:]:
+        add_preview_availability(database, member_id, "18:00", "19:00")
+    refreshed = client.post(f"/plans/{plan['_id']}/find-times")
+    assert refreshed.status_code == 302
+    updated = database.plans.find_one({"_id": plan["_id"]})
+    assert updated["matches"][0]["attendance_count"] == 7
+    assert updated["match_diagnostic"] is None
+
+
+def test_no_full_duration_reports_shorter_possibility(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    add_preview_availability(database, member_id, "18:00", "18:30")
+    response = app.test_client().post(f"/groups/{group_id}/schedule-preview", data={
+        "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "60", "minimum_attendance": "1",
+    })
+    assert response.status_code == 200
+    assert response.get_json()["results"][0]["exact_match"] is False
+    assert response.get_json()["diagnostic"] == {
+        "reason": "duration_unmet", "requested_attendance": 1,
+        "total_members": 1, "maximum_attendance": 0,
+        "best_shorter_minutes": 30, "shorter_attendance": 1,
+    }
+
+
+
+@pytest.mark.parametrize("field,value", [
+    ("duration_minutes", "invalid"), ("minimum_attendance", "invalid"),
+    ("start_date", "invalid"), ("end_date", "invalid"),
+    ("earliest_time", "invalid"), ("latest_time", "invalid"),
+])
+def test_preview_validation_identifies_only_the_invalid_field(app_and_db, field, value):
+    app, database = app_and_db
+    member = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
+    group = make_group(database, member_ids=[member])
+    fields = {
+        "start_date": "2026-11-01", "end_date": "2026-11-08",
+        "duration_minutes": "60", "minimum_attendance": "1",
+        "earliest_time": "09:00", "latest_time": "18:00",
+    }
+    response = app.test_client().post(f"/groups/{group}/schedule-preview", data={**fields, field: value})
+    assert response.status_code == 400
+    assert set(response.get_json()["field_errors"]) == {field}
+
+
+def test_no_weekly_availability_has_distinct_explanation(app_and_db):
+    app, database = app_and_db
+    member_id = database.users.insert_one({"display_name": "Alex", "normalized_name": "alex"}).inserted_id
+    group_id = make_group(database, member_ids=[member_id])
+    response = app.test_client().post(f"/groups/{group_id}/schedule-preview", data={
+        "start_date": "2026-10-23", "end_date": "2026-10-23",
+        "duration_minutes": "60", "minimum_attendance": "1",
+    })
+    assert response.status_code == 200
+    assert response.get_json()["results"] == []
+    assert response.get_json()["diagnostic"]["reason"] == "no_availability"
+
+
+def test_edit_preview_and_save_use_saved_member_snapshot(app_and_db):
+    app, database = app_and_db
+    first, second = [
+        database.users.insert_one({"display_name": name, "normalized_name": name.lower()}).inserted_id
+        for name in ("Alex", "Sam")
+    ]
+    group_id = make_group(database, member_ids=[first])
+    plan_id = make_plan(database, group_id, invited_member_ids=[first, second])
+    client = app.test_client()
+    page = client.get(f"/plans/{plan_id}/edit").get_data(as_text=True)
+    assert 'name="minimum_attendance" type="number" min="1" max="2"' in page
+    fields = {
+        "plan_id": str(plan_id), "title": "Updated", "start_date": "2026-10-23",
+        "end_date": "2026-10-24", "duration_minutes": "60", "minimum_attendance": "2",
+    }
+    preview = client.post(f"/groups/{group_id}/schedule-preview", data=fields)
+    saved = client.post(f"/plans/{plan_id}/edit", data=fields)
+
+    assert preview.status_code == 200
+    assert saved.status_code == 302
+    assert database.plans.find_one({"_id": plan_id})["minimum_attendance"] == 2

@@ -129,6 +129,17 @@ def test_failed_refresh_uses_covered_cache_and_warns(calendar_app, monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["calendar_warnings"]
     assert response.get_json()["results"][0]["start"] == "11:00"
+    client = app.test_client()
+    empty = preview(client, group, earliest_time="10:00", latest_time="11:00").get_json()
+    assert empty["diagnostic"]["reason"] == "no_availability"
+    assert empty["calendar_warnings"]
+    created = client.post(f"/groups/{group}/plans/create", data={
+        "title": "Busy calendar", "start_date": "2026-11-02", "end_date": "2026-11-02",
+        "duration_minutes": "60", "minimum_attendance": "1",
+        "earliest_time": "10:00", "latest_time": "11:00",
+    }, follow_redirects=True)
+    assert b"No availability overlaps" in created.data
+    assert b"using its last successful busy times" in created.data
 
 
 def test_failed_refresh_without_covered_cache_blocks_planning(calendar_app, monkeypatch):

@@ -170,3 +170,76 @@ END:VCALENDAR
         datetime(2026, 11, 2, 17),
         datetime(2026, 11, 4, 17),
     ]
+
+
+def test_floating_ical_time_uses_app_timezone():
+    payload = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Group Planner Test//EN
+BEGIN:VEVENT
+UID:floating@example.test
+DTSTART:20261102T090000
+DTEND:20261102T100000
+END:VEVENT
+END:VCALENDAR
+"""
+    intervals = parse_ical_busy_intervals(
+        payload,
+        start=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 3, tzinfo=timezone.utc),
+        default_timezone=ZoneInfo("America/Los_Angeles"),
+    )
+    assert intervals == [{
+        "start": datetime(2026, 11, 2, 17),
+        "end": datetime(2026, 11, 2, 18),
+    }]
+
+
+def test_all_day_ical_conflict_spans_fall_dst_transition():
+    payload = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Group Planner Test//EN
+BEGIN:VEVENT
+UID:all-day-dst@example.test
+DTSTART;VALUE=DATE:20261101
+DTEND;VALUE=DATE:20261102
+END:VEVENT
+END:VCALENDAR
+"""
+    intervals = parse_ical_busy_intervals(
+        payload,
+        start=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 3, tzinfo=timezone.utc),
+        default_timezone=ZoneInfo("America/Los_Angeles"),
+    )
+    assert intervals == [{
+        "start": datetime(2026, 11, 1, 7),
+        "end": datetime(2026, 11, 2, 8),
+    }]
+
+
+def test_malformed_ical_interval_does_not_discard_valid_busy_time():
+    payload = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Group Planner Test//EN
+BEGIN:VEVENT
+UID:invalid@example.test
+DTSTART:20261102T100000Z
+DTEND:20261102T090000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:valid@example.test
+DTSTART:20261102T170000Z
+DTEND:20261102T180000Z
+END:VEVENT
+END:VCALENDAR
+"""
+    intervals = parse_ical_busy_intervals(
+        payload,
+        start=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        end=datetime(2026, 11, 3, tzinfo=timezone.utc),
+    )
+    assert intervals == [{
+        "start": datetime(2026, 11, 2, 17),
+        "end": datetime(2026, 11, 2, 18),
+    }]

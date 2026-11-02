@@ -55,7 +55,7 @@
     <summary>Scheduling Requirements</summary>
     <div class="plan-summary compact-plan-summary">
       <div><strong>{{ plan.duration_minutes|duration_label }}</strong><span>Requested duration</span></div>
-      <div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div>
+      <div><strong>{{ plan.minimum_attendance }}/{{ (plan.invited_member_ids if plan.invited_member_ids is defined else group.member_ids)|length }}</strong><span>Minimum attendance</span></div>
       <div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div>
       <div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
     </div>
@@ -97,7 +97,7 @@
   </section>
 
   <section class="plan-summary card">
-    <div><strong>{{ plan.duration_minutes }}</strong><span>Requested minutes</span></div><div><strong>{{ plan.minimum_attendance }}/{{ group.member_ids|length }}</strong><span>Minimum attendance</span></div><div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div><div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
+    <div><strong>{{ plan.duration_minutes }}</strong><span>Requested minutes</span></div><div><strong>{{ plan.minimum_attendance }}/{{ (plan.invited_member_ids if plan.invited_member_ids is defined else group.member_ids)|length }}</strong><span>Minimum attendance</span></div><div><strong>{{ plan.earliest_time|time12 if plan.earliest_time else 'Any' }}</strong><span>Earliest</span></div><div><strong>{{ plan.latest_time|time12 if plan.latest_time else 'Any' }}</strong><span>Latest</span></div>
   </section>
 
   <section class="content-section"><div class="section-heading"><h2>{% if plan.match_type == 'alternative' %}Closest Available Options{% else %}Best Times{% endif %}</h2>{% if plan.matches_generated_at %}<span class="muted small">Automatically calculated {{ plan.matches_generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}</div>
@@ -115,7 +115,13 @@
           </article>
         {% endfor %}
       </div>
-    {% elif plan.matches_generated_at %}<div class="card empty-state"><h2>No matching times were found</h2><p>The minimum attendance requirement could not be met. Try changing the plan or adding more availability.</p></div>
+    {% elif plan.matches_generated_at %}<div class="card empty-state"><h2>No matching times were found</h2>
+      {% set diagnostic = plan.match_diagnostic %}
+      {% if diagnostic and diagnostic.reason == 'attendance_unmet' %}<p>The minimum is {{ diagnostic.requested_attendance }} of {{ diagnostic.total_members }}, but at most {{ diagnostic.maximum_attendance }} can attend for {{ plan.duration_minutes }} minutes in this date range. Lower the minimum to {{ diagnostic.maximum_attendance }}, widen the dates, or add availability.</p>
+      {% elif diagnostic and diagnostic.reason == 'duration_unmet' %}<p>No full {{ plan.duration_minutes }}-minute window is available. A shorter {{ diagnostic.best_shorter_minutes }}-minute window can fit {{ diagnostic.shorter_attendance }} of {{ diagnostic.total_members }} members. Shorten the duration, widen the dates, or add availability.</p>
+      {% else %}<p>No availability overlaps these requirements. Change the dates or allowed times, or ask members to add availability.</p>{% endif %}
+      {% if can_manage_group %}<div class="button-row"><a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Adjust plan</a><a class="button secondary" href="{{ url_for('group_detail', group_id=group._id) }}">Review group availability</a></div>{% endif %}
+    </div>
     {% else %}<div class="card empty-state"><h2>No options yet</h2><p>Add availability or adjust the plan requirements to find a matching time.</p></div>{% endif %}
   </section>
 {% endif %}

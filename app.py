@@ -559,48 +559,60 @@ def create_app(database_override=None):
             "latest_time": form.get("latest_time", "").strip() or None,
         }
         errors = []
-        try:
-            values["duration_minutes"] = int(form.get("duration_minutes", "0"))
-            values["minimum_attendance"] = int(form.get("minimum_attendance", "0"))
-        except (TypeError, ValueError):
-            values["duration_minutes"] = 0
-            values["minimum_attendance"] = 0
+        field_errors = {}
+
+        def add_error(field, message):
+            errors.append(message)
+            field_errors.setdefault(field, message)
 
         try:
-            parsed_start = parse_date(values["start_date"])
-            parsed_end = parse_date(values["end_date"])
-            if parsed_end < parsed_start:
-                errors.append("End date must be on or after the start date.")
-            if (parsed_end - parsed_start).days > 366:
-                errors.append("Date range must be one year or less.")
+            values["duration_minutes"] = int(form.get("duration_minutes", "0"))
         except (TypeError, ValueError):
-            errors.append("Please enter a valid date range.")
-        if require_title and not values["title"]:
-            errors.append("Plan title is required.")
-        if values["duration_minutes"] <= 0:
-            errors.append("Meeting duration must be greater than zero.")
-        if values["minimum_attendance"] < 1:
-            errors.append("Minimum attendance must be at least one.")
-        if values["minimum_attendance"] > group_size:
-            errors.append("Minimum attendance cannot exceed the group size.")
+            values["duration_minutes"] = 0
         try:
-            if values["earliest_time"]:
-                values["earliest_time"] = normalize_time_text(values["earliest_time"])
-            if values["latest_time"]:
-                values["latest_time"] = normalize_time_text(values["latest_time"])
-            if values["earliest_time"]:
-                parse_time(values["earliest_time"])
-            if values["latest_time"]:
-                parse_time(values["latest_time"])
-            if (
-                values["earliest_time"]
-                and values["latest_time"]
-                and parse_time(values["latest_time"]) <= parse_time(values["earliest_time"])
-            ):
-                errors.append("Latest allowed time must be later than earliest allowed time.")
-        except ValueError:
-            errors.append("Please enter valid allowed times.")
-        return values, errors
+            values["minimum_attendance"] = int(form.get("minimum_attendance", "0"))
+        except (TypeError, ValueError):
+            values["minimum_attendance"] = 0
+
+        parsed_start = parsed_end = None
+        try:
+            parsed_start = parse_date(values["start_date"])
+        except (TypeError, ValueError):
+            add_error("start_date", "Please enter a valid start date.")
+        try:
+            parsed_end = parse_date(values["end_date"])
+        except (TypeError, ValueError):
+            add_error("end_date", "Please enter a valid end date.")
+        if parsed_start and parsed_end:
+            if parsed_end < parsed_start:
+                add_error("end_date", "End date must be on or after the start date.")
+            if (parsed_end - parsed_start).days > 366:
+                add_error("end_date", "Date range must be one year or less.")
+        if require_title and not values["title"]:
+            add_error("title", "Plan title is required.")
+        if values["duration_minutes"] <= 0:
+            add_error("duration_minutes", "Meeting duration must be greater than zero.")
+        if values["minimum_attendance"] < 1:
+            add_error("minimum_attendance", "Minimum attendance must be at least one.")
+        if values["minimum_attendance"] > group_size:
+            add_error("minimum_attendance", "Minimum attendance cannot exceed the group size.")
+        for field, label in (("earliest_time", "earliest"), ("latest_time", "latest")):
+            if not values[field]:
+                continue
+            try:
+                values[field] = normalize_time_text(values[field])
+                parse_time(values[field])
+            except ValueError:
+                add_error(field, f"Please enter a valid {label} allowed time.")
+        if (
+            values["earliest_time"]
+            and values["latest_time"]
+            and "earliest_time" not in field_errors
+            and "latest_time" not in field_errors
+            and parse_time(values["latest_time"]) <= parse_time(values["earliest_time"])
+        ):
+            add_error("latest_time", "Latest allowed time must be later than earliest allowed time.")
+        return values, errors, field_errors
 
     def calculate_matches(group, values, exclude_plan_id=None):
         member_ids = plan_member_ids(values, group)
@@ -668,7 +680,7 @@ def create_app(database_override=None):
                                     "start": busy_start,
                                     "end": busy_end,
                                 })
-        return find_matching_times(
+        search = dict(
             member_ids=member_ids,
             availability_records=availability_records,
             start_date=values["start_date"],
@@ -681,6 +693,24 @@ def create_app(database_override=None):
             busy_intervals_by_member=busy_intervals_by_member,
             timezone_name=app.config["APP_TIMEZONE"],
         )
+        matches = find_matching_times(**search)
+        diagnostic = None
+        if not matches or not matches[0]["is_exact"]:
+            best = matches or (find_matching_times(**{**search, "minimum_attendance": 1, "max_results": 1}) if member_ids else [])
+            diagnostic = {
+                "reason": "no_availability", "requested_attendance": values["minimum_attendance"],
+                "total_members": len(member_ids), "maximum_attendance": 0,
+            }
+            if best:
+                candidate = best[0]
+                if candidate["is_exact"]:
+                    diagnostic.update(reason="attendance_unmet", maximum_attendance=candidate["attendance_count"])
+                else:
+                    diagnostic.update(reason="duration_unmet",
+                                      best_shorter_minutes=candidate["available_duration_minutes"],
+                                      shorter_attendance=candidate["attendance_count"])
+        values["_match_diagnostic"] = diagnostic
+        return matches
 
     def match_metadata(matches):
         return {
@@ -696,6 +726,7 @@ def create_app(database_override=None):
     def refresh_plan_matches(plan, group):
         matches = calculate_matches(group, plan, exclude_plan_id=plan["_id"])
         metadata = match_metadata(matches)
+        metadata["match_diagnostic"] = plan.pop("_match_diagnostic", None)
         metadata["calendar_warnings"] = plan.pop("_calendar_warnings", [])
         require_database().plans.update_one(
             {"_id": plan["_id"]}, {"$set": metadata}
@@ -3015,7 +3046,7 @@ def create_app(database_override=None):
         require_group_permission(group, "manage_plans")
         group_size = len(group.get("member_ids", []))
         if request.method == "POST":
-            values, errors = validate_plan_form(request.form, group_size)
+            values, errors, field_errors = validate_plan_form(request.form, group_size)
             if errors:
                 for error in errors:
                     flash(error, "error")
@@ -3031,12 +3062,13 @@ def create_app(database_override=None):
             result = db.plans.insert_one(values)
             values["_id"] = result.inserted_id
             try:
-                refresh_plan_matches(values, group)
+                matches = refresh_plan_matches(values, group)
             except ValueError as exc:
                 app.logger.warning("Unable to generate initial matches: %s", exc)
                 flash(str(exc), "error")
             else:
-                flash("Plan created. The best available times are ready to review.", "success")
+                flash("Plan created. The best available times are ready to review." if matches
+                      else "Plan created. No times meet the current requirements yet.", "success")
             return redirect(url_for("plan_detail", plan_id=result.inserted_id))
         return render_template("plan_create.html", group=group)
 
@@ -3054,11 +3086,11 @@ def create_app(database_override=None):
             if not preview_plan:
                 abort(404)
         member_ids = plan_member_ids(preview_plan, group) if preview_plan else group.get("member_ids", [])
-        values, errors = validate_plan_form(
+        values, errors, field_errors = validate_plan_form(
             request.form, len(member_ids), require_title=False
         )
         if errors:
-            return jsonify({"success": False, "errors": errors, "results": []}), 400
+            return jsonify({"success": False, "errors": errors, "field_errors": field_errors, "results": []}), 400
         try:
             values["invited_member_ids"] = list(member_ids)
             matches = calculate_matches(
@@ -3079,7 +3111,7 @@ def create_app(database_override=None):
             }
             for match in matches
         ]
-        return jsonify({"success": True, "results": results,
+        return jsonify({"success": True, "results": results, "diagnostic": values.pop("_match_diagnostic", None),
                         "calendar_warnings": values.pop("_calendar_warnings", [])})
 
     @app.get("/plans/<plan_id>")
@@ -3101,7 +3133,8 @@ def create_app(database_override=None):
         eligible_invitees = [
             member for member in group_members if member["_id"] not in participant_ids
         ]
-        if not has_confirmed_schedule(plan) and not plan.get("matches"):
+        if (not has_confirmed_schedule(plan) and not plan.get("matches")
+                and (not plan.get("matches_generated_at") or "match_diagnostic" not in plan)):
             try:
                 refresh_plan_matches(plan, group)
             except ValueError as exc:
@@ -3147,7 +3180,7 @@ def create_app(database_override=None):
         require_group_permission(group, "manage_plans")
 
         if request.method == "POST":
-            values, errors = validate_plan_form(request.form, len(group.get("member_ids", [])))
+            values, errors, field_errors = validate_plan_form(request.form, len(plan_member_ids(plan, group)))
             if errors:
                 for error in errors:
                     flash(error, "error")
@@ -3161,7 +3194,7 @@ def create_app(database_override=None):
             update = {"$set": values}
             if constraints_changed:
                 update["$set"].update({"status": "planning", "matches": []})
-                update["$unset"] = {"match_type": "", "matches_generated_at": ""}
+                update["$unset"] = {"match_type": "", "matches_generated_at": "", "match_diagnostic": ""}
                 update["$unset"].update(clear_scheduled_fields())
             db.plans.update_one({"_id": plan["_id"]}, update)
             if constraints_changed:
