@@ -209,6 +209,10 @@ For Google Calendar, add the calendar callback above to the same Google OAuth cl
 
 The automated suite mocks provider responses and cannot verify OAuth credentials, published feed permissions, or a live Google account. Calendar sync stores only busy intervals, never event titles. Google FreeBusy requests are split into short date windows covering the requested plan dates.
 
+For an iCal connection, paste a direct HTTPS subscription feed URL. If the provider returns HTTP 429, the Account page now says it is limiting requests; automatic refresh waits 15 minutes before trying again, while a covered successful cache remains usable. HTTP 401, 403, and 404 each get a specific message, as does invalid iCal data. Check the deployed app with an owned public feed and, separately, a secret feed that works in a browser. Server logs record only a failure category and HTTP status, never the feed URL or event data. A provider that continues returning 429 cannot be made to serve a feed by the app.
+
+A Google `public/basic.ics` address requires **Make available to public** for that calendar; the owner can choose **See only free/busy (hide details)**. If Google returns HTTP 404, check that setting and copy the public iCal address again. Google may take time to apply a sharing change. Keep a Google secret iCal address private and enter it only in the Account form.
+
 In MongoDB Atlas, create a database user with `readWrite` access to the value used for `MONGO_DB_NAME`, and allow the development machine's IP address in Network Access. Avoid using a broad `0.0.0.0/0` rule unless it is temporary and understood.
 
 ### 5. Start the application

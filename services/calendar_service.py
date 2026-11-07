@@ -16,6 +16,15 @@ SYNC_WINDOW_DAYS = 366
 MAX_REDIRECTS = 3
 
 
+class CalendarFeedError(ValueError):
+    """A safe, URL-free reason an iCal subscription could not be read."""
+
+    def __init__(self, code, message, status_code=None):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
 def timezone_info(value):
     """Return an IANA timezone, rejecting ambiguous fixed-offset labels."""
     if hasattr(value, "utcoffset"):
@@ -67,17 +76,17 @@ def merge_intervals(intervals):
 def safe_calendar_url(url):
     parsed = urlsplit((url or "").strip())
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("Calendar URLs must use HTTPS and a public hostname.")
+        raise CalendarFeedError("unsafe_url", "Calendar URLs must use HTTPS and a public hostname.")
     hostname = parsed.hostname.rstrip(".")
     if hostname.casefold() in {
         "localhost", "localhost.localdomain", "metadata.google.internal",
         "metadata", "instance-data.ec2.internal",
     } or hostname.casefold().endswith(".localhost"):
-        raise ValueError("Calendar URL must not point to a private network.")
+        raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
     except (OSError, socket.gaierror) as exc:
-        raise ValueError("Calendar host could not be resolved.") from exc
+        raise CalendarFeedError("dns", "Calendar host could not be resolved.") from exc
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if (
@@ -88,34 +97,59 @@ def safe_calendar_url(url):
             or ip.is_multicast
             or ip.is_unspecified
         ):
-            raise ValueError("Calendar URL must not point to a private network.")
+            raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
     return parsed.geturl()
 
 
 def fetch_calendar_url(url, request_get=requests.get):
     current_url = safe_calendar_url(url)
     for _redirect in range(MAX_REDIRECTS + 1):
-        response = request_get(
-            current_url,
-            timeout=(3.05, 10),
-            allow_redirects=False,
-            stream=True,
-            headers={"Accept": "text/calendar, text/plain;q=0.8"},
-        )
-        if response.is_redirect:
-            location = response.headers.get("Location")
-            if not location:
-                raise ValueError("Calendar redirect did not provide a destination.")
-            current_url = safe_calendar_url(urljoin(current_url, location))
-            continue
-        response.raise_for_status()
-        body = b""
-        for chunk in response.iter_content(chunk_size=65536):
-            body += chunk
-            if len(body) > MAX_CALENDAR_BYTES:
-                raise ValueError("Calendar feed is too large.")
-        return body
-    raise ValueError("Calendar URL redirected too many times.")
+        try:
+            response = request_get(
+                current_url,
+                timeout=(3.05, 10),
+                allow_redirects=False,
+                stream=True,
+                headers={"Accept": "text/calendar, text/plain;q=0.8"},
+            )
+        except requests.Timeout as exc:
+            raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
+        except requests.RequestException as exc:
+            raise CalendarFeedError("network", "Calendar provider could not be reached.") from exc
+        try:
+            if response.is_redirect:
+                location = response.headers.get("Location")
+                if not location:
+                    raise CalendarFeedError("redirect", "Calendar redirect had no destination.")
+                current_url = safe_calendar_url(urljoin(current_url, location))
+                continue
+            status = response.status_code
+            if status == 429:
+                raise CalendarFeedError("rate_limited", "Calendar provider limited requests.", status)
+            if status == 401:
+                raise CalendarFeedError("authentication_required", "Calendar feed requires authorization.", status)
+            if status == 403:
+                raise CalendarFeedError("forbidden", "Calendar provider denied access.", status)
+            if status == 404:
+                raise CalendarFeedError("not_found", "Calendar feed was not found.", status)
+            if status >= 500:
+                raise CalendarFeedError("provider_error", "Calendar provider is unavailable.", status)
+            if status >= 400:
+                raise CalendarFeedError("http_error", "Calendar provider rejected the request.", status)
+            body = b""
+            try:
+                for chunk in response.iter_content(chunk_size=65536):
+                    body += chunk
+                    if len(body) > MAX_CALENDAR_BYTES:
+                        raise CalendarFeedError("too_large", "Calendar feed is too large.")
+            except requests.Timeout as exc:
+                raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
+            except requests.RequestException as exc:
+                raise CalendarFeedError("network", "Calendar provider could not be reached.") from exc
+            return body
+        finally:
+            response.close()
+    raise CalendarFeedError("redirect", "Calendar URL redirected too many times.")
 
 
 def parse_ical_busy_intervals(payload, *, start=None, end=None, default_timezone=timezone.utc):

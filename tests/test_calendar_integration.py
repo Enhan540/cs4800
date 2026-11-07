@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import mongomock
 import pytest
 from cryptography.fernet import Fernet
+from services.calendar_service import CalendarFeedError
 
 os.environ["MONGO_URI"] = ""
 from app import create_app
@@ -289,6 +290,72 @@ def test_multiple_ical_feeds_and_duplicate_url_update(calendar_app, monkeypatch)
     })
     assert database.calendar_connections.count_documents({"provider": "ical"}) == 2
     assert b"Work calendar" in client.get("/account").data
+
+
+@pytest.mark.parametrize("category, status, message", [
+    ("rate_limited", 429, b"limiting requests (HTTP 429)"),
+    ("not_found", 404, b"not found (HTTP 404)"),
+])
+def test_ical_provider_failure_is_explained_without_saving_or_exposing_url(
+    calendar_app, monkeypatch, caplog, category, status, message,
+):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "feed-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    secret_url = "https://calendar.google.com/calendar/ical/owner/private-secret/basic.ics"
+    monkeypatch.setattr("app.fetch_calendar_url", lambda _url: (_ for _ in ()).throw(
+        CalendarFeedError(category, "Calendar provider failed.", status)
+    ))
+
+    response = client.post("/account/calendars/ical", data={
+        "calendar_name": "Personal", "calendar_url": secret_url,
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert message in response.data
+    assert database.calendar_connections.count_documents({"provider": "ical"}) == 0
+    assert secret_url.encode() not in response.data
+    assert secret_url not in caplog.text
+    assert f"category={category} status={status}" in caplog.text
+
+
+def test_ical_rate_limit_keeps_covered_cache_without_repeated_fetches(calendar_app, monkeypatch):
+    app, database = calendar_app
+    account, _member, group = planning_group(database)
+    connection_id = database.calendar_connections.insert_one({
+        "account_id": account, "provider": "ical", "sync_status": "connected",
+        "secret_ciphertext": encrypted({"url": "https://example.test/secret.ics"}),
+        "last_synced_at": datetime(2026, 10, 30),
+        "cache_start": datetime(2026, 11, 2, 8),
+        "cache_end": datetime(2026, 11, 3, 8),
+        "busy_intervals": [{"start": datetime(2026, 11, 2, 18),
+                            "end": datetime(2026, 11, 2, 19)}],
+    }).inserted_id
+    calls = []
+
+    def rate_limited(_url):
+        calls.append(True)
+        raise CalendarFeedError("rate_limited", "Calendar provider limited requests.", 429)
+
+    monkeypatch.setattr("app.fetch_calendar_url", rate_limited)
+    first = preview(app.test_client(), group, earliest_time="10:00")
+    second = preview(app.test_client(), group, earliest_time="10:00")
+
+    assert first.status_code == second.status_code == 200
+    assert first.get_json()["results"][0]["start"] == "11:00"
+    assert second.get_json()["calendar_warnings"]
+    assert len(calls) == 1
+    uncovered = preview(app.test_client(), group, start_date="2026-11-03", end_date="2026-11-03")
+    assert uncovered.status_code == 400
+    assert "could not sync" in uncovered.get_json()["errors"][0]
+    assert len(calls) == 1
+    connection = database.calendar_connections.find_one({"_id": connection_id})
+    assert connection["sync_error"] == "The calendar provider is limiting requests (HTTP 429). Try again later."
+    assert connection["next_sync_attempt_at"] > datetime(2026, 11, 1, 20)
 
 
 def test_readding_legacy_ical_url_upgrades_connection(calendar_app, monkeypatch):

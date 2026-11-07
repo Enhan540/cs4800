@@ -3,7 +3,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from services.calendar_service import normalized_interval, parse_ical_busy_intervals, safe_calendar_url
+from services.calendar_service import (
+    CalendarFeedError, fetch_calendar_url, normalized_interval,
+    parse_ical_busy_intervals, safe_calendar_url,
+)
 
 
 def test_cancelled_and_transparent_events_do_not_block_time():
@@ -85,6 +88,69 @@ END:VCALENDAR
 def test_private_calendar_urls_are_rejected():
     with pytest.raises(ValueError, match="private network"):
         safe_calendar_url("https://127.0.0.1/private.ics")
+
+
+def test_google_public_and_secret_ical_links_pass_url_validation(monkeypatch):
+    monkeypatch.setattr("services.calendar_service.socket.getaddrinfo", lambda *_args, **_kwargs: [
+        (None, None, None, None, ("8.8.8.8", 443)),
+    ])
+    for path in ("public/basic.ics", "private-secret/basic.ics"):
+        url = f"https://calendar.google.com/calendar/ical/example%40gmail.com/{path}"
+        assert safe_calendar_url(url) == url
+
+
+@pytest.mark.parametrize("status, expected_code", [
+    (429, "rate_limited"),
+    (401, "authentication_required"),
+    (403, "forbidden"),
+    (404, "not_found"),
+])
+def test_ical_fetch_classifies_provider_failure_without_exposing_secret_url(monkeypatch, status, expected_code):
+    monkeypatch.setattr("services.calendar_service.socket.getaddrinfo", lambda *_args, **_kwargs: [
+        (None, None, None, None, ("8.8.8.8", 443)),
+    ])
+    secret_url = "https://calendar.google.com/calendar/ical/example%40gmail.com/private-secret/basic.ics"
+
+    class FailedResponse:
+        is_redirect = False
+        headers = {"Content-Type": "text/html"}
+        closed = False
+
+        def __init__(self):
+            self.status_code = status
+
+        def close(self):
+            self.closed = True
+
+    response = FailedResponse()
+    with pytest.raises(CalendarFeedError) as error:
+        fetch_calendar_url(secret_url, request_get=lambda *_args, **_kwargs: response)
+    assert (error.value.code, error.value.status_code) == (expected_code, status)
+    assert secret_url not in str(error.value)
+    assert response.closed
+
+
+def test_ical_fetch_returns_valid_feed_and_closes_response(monkeypatch):
+    monkeypatch.setattr("services.calendar_service.socket.getaddrinfo", lambda *_args, **_kwargs: [
+        (None, None, None, None, ("8.8.8.8", 443)),
+    ])
+    payload = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nEND:VCALENDAR\r\n"
+
+    class FeedResponse:
+        is_redirect = False
+        status_code = 200
+        headers = {"Content-Type": "text/calendar"}
+        closed = False
+
+        def iter_content(self, chunk_size):
+            yield payload
+
+        def close(self):
+            self.closed = True
+
+    response = FeedResponse()
+    assert fetch_calendar_url("https://example.com/feed.ics", request_get=lambda *_args, **_kwargs: response) == payload
+    assert response.closed
 
 
 def test_normalized_interval_converts_utc_to_naive_storage_time():

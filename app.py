@@ -22,7 +22,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from cryptography.fernet import Fernet, InvalidToken
 import requests
 
-from services.calendar_service import fetch_calendar_url, merge_intervals as merge_calendar_intervals, normalized_interval, parse_ical_busy_intervals
+from services.calendar_service import CalendarFeedError, fetch_calendar_url, merge_intervals as merge_calendar_intervals, normalized_interval, parse_ical_busy_intervals
 from services.availability_service import (
     availability_segments_for_date,
     calendar_busy_for_date,
@@ -58,6 +58,35 @@ CALENDAR_FRESHNESS_SECONDS = {
     "scheduling": 60,
 }
 GOOGLE_FREEBUSY_CHUNK_DAYS = 30
+ICAL_ERROR_MESSAGES = {
+    "unsafe_url": "Use an HTTPS iCal link from a public internet host.",
+    "dns": "The calendar host could not be found. Check the link and try again.",
+    "timeout": "The calendar provider timed out. Try again later.",
+    "network": "The calendar provider could not be reached. Try again later.",
+    "rate_limited": "The calendar provider is limiting requests (HTTP 429). Try again later.",
+    "authentication_required": "The calendar feed requires authorization (HTTP 401). Use a subscription link that works without signing in.",
+    "forbidden": "The calendar provider denied access (HTTP 403). Check the feed's sharing settings.",
+    "not_found": "The calendar feed was not found (HTTP 404). For a Google public iCal link, make the calendar public and copy its iCal address again.",
+    "provider_error": "The calendar provider is temporarily unavailable. Try again later.",
+    "http_error": "The calendar provider rejected the link. Check it and try again.",
+    "too_large": "The calendar feed is larger than the 2 MB limit.",
+    "redirect": "The calendar link redirects too many times or to an unsafe address.",
+    "invalid_feed": "The link did not return a valid iCal calendar.",
+    "unexpected": "The calendar could not be connected right now. Try again later.",
+}
+
+
+def ical_failure_details(exc):
+    """Return a safe category and owner-facing message without exposing feed URLs."""
+    if isinstance(exc, CalendarFeedError):
+        code, status = exc.code, exc.status_code
+    elif isinstance(exc, requests.RequestException):
+        code, status = "network", getattr(getattr(exc, "response", None), "status_code", None)
+    elif isinstance(exc, ValueError):
+        code, status = "invalid_feed", None
+    else:
+        code, status = "unexpected", None
+    return code, status, ICAL_ERROR_MESSAGES.get(code, ICAL_ERROR_MESSAGES["unexpected"])
 
 
 def aware_utc(value):
@@ -1190,18 +1219,29 @@ def create_app(database_override=None):
                 update["secret_ciphertext"] = encrypt_calendar_secret(secret)
             db.calendar_connections.update_one(
                 {"_id": connection["_id"]},
-                {"$set": update},
+                {"$set": update, "$unset": {"next_sync_attempt_at": ""}},
             )
             return True
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if connection.get("provider") == "ical":
+                category, status, user_message = ical_failure_details(exc)
+            else:
+                category = type(exc).__name__
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                user_message = "Calendar could not be synced."
             app.logger.warning(
                 "Calendar sync failed: provider=%s category=%s status=%s",
-                connection.get("provider"), type(exc).__name__, status,
+                connection.get("provider"), category, status,
             )
+            failure_update = {"sync_status": "error", "sync_error": user_message}
+            if connection.get("provider") == "ical" and category == "rate_limited":
+                failure_update["next_sync_attempt_at"] = utc_now() + timedelta(minutes=15)
+            failure_change = {"$set": failure_update}
+            if "next_sync_attempt_at" not in failure_update:
+                failure_change["$unset"] = {"next_sync_attempt_at": ""}
             db.calendar_connections.update_one(
                 {"_id": connection["_id"]},
-                {"$set": {"sync_status": "error", "sync_error": "Calendar could not be synced."}},
+                failure_change,
             )
             return False
 
@@ -1223,6 +1263,14 @@ def create_app(database_override=None):
             if (not force and covered and last_synced and
                     utc_now() - last_synced <= threshold and
                     connection.get("sync_status") == "connected"):
+                continue
+            retry_at = aware_utc(as_datetime(connection.get("next_sync_attempt_at")))
+            if not force and retry_at and utc_now() < retry_at:
+                if mode == "scheduling" and not covered:
+                    raise CalendarUnavailableError(
+                        "A connected calendar could not sync for these dates. Sync or disconnect it before scheduling."
+                    )
+                warnings.append("A connected calendar could not refresh; using its last successful busy times.")
                 continue
             lease = db.calendar_connections.update_one(
                 {"_id": connection["_id"], "$or": [
@@ -1876,8 +1924,10 @@ def create_app(database_override=None):
                 payload, start=start, end=end,
                 default_timezone=ZoneInfo(app.config["APP_TIMEZONE"])
             )
-        except (ValueError, requests.RequestException):
-            flash("That calendar URL could not be safely connected.", "error")
+        except (ValueError, requests.RequestException) as exc:
+            category, status, user_message = ical_failure_details(exc)
+            app.logger.warning("iCal connection failed: category=%s status=%s", category, status)
+            flash(user_message, "error")
             return redirect(url_for("account"))
         now = utc_now()
         db = require_database()
@@ -1908,7 +1958,8 @@ def create_app(database_override=None):
                 "last_synced_at": now,
                 "sync_error": None,
                 "updated_at": now,
-            }, "$setOnInsert": {"created_at": now}},
+            }, "$setOnInsert": {"created_at": now},
+               "$unset": {"next_sync_attempt_at": ""}},
             upsert=True,
         )
         flash("Personal calendar connected and synced.", "success")
@@ -1925,7 +1976,8 @@ def create_app(database_override=None):
         if sync_calendar_connection(connection):
             flash("Calendar synced.", "success")
         else:
-            flash("Calendar could not be synced. Your weekly availability is still being used.", "error")
+            latest = require_database().calendar_connections.find_one({"_id": connection["_id"]})
+            flash((latest or {}).get("sync_error") or "Calendar could not be synced.", "error")
         return redirect(url_for("account"))
 
     @app.post("/account/calendars/<connection_id>/disconnect")
