@@ -276,11 +276,25 @@ def test_google_callback_creates_empty_account_without_storing_token(auth_app_an
     assert response.headers["Location"].endswith("/account/complete-username")
     account = database.accounts.find_one({"google_sub": "google-user-123"})
     assert account["google_email"] == "person@example.com"
+    assert account["google_name"] == "Example Person"
     assert account["auth_methods"] == ["google"]
     assert "access_token" not in account
     assert "refresh_token" not in account
     assert database.groups.count_documents({"account_ids": account["_id"]}) == 0
     assert database.users.count_documents({"account_id": account["_id"]}) == 0
+
+    completed = client.post("/account/complete-username", data={"username": "google-user"})
+    assert completed.headers["Location"].endswith("/account?calendar_prompt=1")
+    prompt = client.get(completed.headers["Location"])
+    assert b"Connect Google Calendar?" in prompt.data
+    assert b"Skip for now" in prompt.data
+
+
+def test_privacy_policy_is_public(auth_app_and_db):
+    app, _database = auth_app_and_db
+    response = app.test_client().get("/privacy")
+    assert response.status_code == 200
+    assert b"free and busy times" in response.data
 
 
 def test_google_callback_reuses_subject_and_does_not_duplicate_account(auth_app_and_db):

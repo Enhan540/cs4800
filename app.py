@@ -22,9 +22,11 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from cryptography.fernet import Fernet, InvalidToken
 import requests
 
-from services.calendar_service import fetch_calendar_url, normalized_interval, parse_ical_busy_intervals
+from services.calendar_service import fetch_calendar_url, merge_intervals as merge_calendar_intervals, normalized_interval, parse_ical_busy_intervals
 from services.availability_service import (
     availability_segments_for_date,
+    calendar_busy_for_date,
+    effective_availability_for_date,
     group_availability_blocks,
 )
 from services.conflict_service import effective_plan_interval, intervals_overlap
@@ -110,6 +112,7 @@ def create_app(database_override=None):
         GOOGLE_CLIENT_SECRET=os.getenv("GOOGLE_CLIENT_SECRET", ""),
         GOOGLE_REDIRECT_URI=os.getenv("GOOGLE_REDIRECT_URI", ""),
         GOOGLE_CALENDAR_REDIRECT_URI=os.getenv("GOOGLE_CALENDAR_REDIRECT_URI", ""),
+        SUPPORT_EMAIL=os.getenv("SUPPORT_EMAIL", ""),
         APP_TIMEZONE=timezone_name,
         APP_BASE_URL=os.getenv("APP_BASE_URL", ""),
         EMAIL_DELIVERY_MODE=os.getenv("EMAIL_DELIVERY_MODE", "console"),
@@ -225,7 +228,7 @@ def create_app(database_override=None):
         client_id=app.config["GOOGLE_CLIENT_ID"],
         client_secret=app.config["GOOGLE_CLIENT_SECRET"],
         server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_kwargs={"scope": "https://www.googleapis.com/auth/calendar.events.freebusy"},
+        client_kwargs={"scope": "https://www.googleapis.com/auth/calendar.events.freebusy https://www.googleapis.com/auth/calendar.calendarlist.readonly"},
     )
     app.extensions["google_calendar_oauth_client"] = google_calendar
 
@@ -488,7 +491,7 @@ def create_app(database_override=None):
         """Return cached busy intervals strictly scoped to each member account."""
         db = require_database()
         account_by_member = {
-            str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
+            str(member["_id"]): member.get("linked_account_id")
             for member in members
         }
         account_ids = [account_id for account_id in account_by_member.values() if account_id]
@@ -933,6 +936,8 @@ def create_app(database_override=None):
     def time12(value):
         if not value:
             return "—"
+        if value == "24:00":
+            return "12:00 AM"
         try:
             return datetime.strptime(value, "%H:%M").strftime("%I:%M %p").lstrip("0")
         except ValueError:
@@ -1028,6 +1033,10 @@ def create_app(database_override=None):
             return redirect(url_for("dashboard"))
         return render_template("landing.html")
 
+    @app.get("/privacy")
+    def privacy():
+        return render_template("privacy.html", support_email=app.config["SUPPORT_EMAIL"])
+
     def safe_next_url(value):
         parsed = urlsplit(value or "")
         if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
@@ -1066,7 +1075,56 @@ def create_app(database_override=None):
         return bool(connection.get("last_synced_at") and cached_start and cached_end
                     and cached_start <= start and cached_end >= end)
 
-    def sync_calendar_connection(connection, start=None, end=None):
+    def refresh_google_access(secret, connection):
+        refresh = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": app.config["GOOGLE_CLIENT_ID"],
+                "client_secret": app.config["GOOGLE_CLIENT_SECRET"],
+                "refresh_token": secret["refresh_token"],
+                "grant_type": "refresh_token",
+            }, timeout=(3.05, 15),
+        )
+        refresh.raise_for_status()
+        token = refresh.json().get("access_token")
+        if not token:
+            raise ValueError("Google Calendar authorization needs to be reconnected.")
+        secret["access_token"] = token
+        require_database().calendar_connections.update_one(
+            {"_id": connection["_id"]},
+            {"$set": {"secret_ciphertext": encrypt_calendar_secret(secret)}},
+        )
+        return token
+
+    def google_calendar_list(connection, secret):
+        calendars = []
+        page_token = None
+        for _ in range(20):
+            params = {"maxResults": 250, "minAccessRole": "freeBusyReader"}
+            if page_token:
+                params["pageToken"] = page_token
+            response = requests.get(
+                "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                headers={"Authorization": f"Bearer {secret['access_token']}"},
+                params=params, timeout=(3.05, 15),
+            )
+            if response.status_code == 401 and secret.get("refresh_token"):
+                refresh_google_access(secret, connection)
+                response = requests.get(
+                    "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                    headers={"Authorization": f"Bearer {secret['access_token']}"},
+                    params=params, timeout=(3.05, 15),
+                )
+            response.raise_for_status()
+            payload = response.json()
+            calendars.extend({"id": item["id"], "name": item.get("summaryOverride") or item.get("summary") or "Google Calendar", "primary": bool(item.get("primary"))}
+                             for item in payload.get("items", []) if item.get("id"))
+            page_token = payload.get("nextPageToken")
+            if not page_token:
+                return calendars
+        raise ValueError("Google returned too many calendar list pages.")
+
+    def sync_calendar_connection(connection, start=None, end=None, selected_calendars=None):
         db = require_database()
         start, end = (start, end) if start and end else calendar_window()
         try:
@@ -1081,63 +1139,58 @@ def create_app(database_override=None):
                 token = secret.get("access_token")
                 if not token:
                     raise ValueError("Google Calendar authorization needs to be reconnected.")
-                intervals = []
+                selected = selected_calendars or secret.get("selected_calendars") or [{"id": "primary", "name": "Primary calendar"}]
+                if not selected:
+                    raise ValueError("Select at least one Google calendar.")
+                sources = [[] for _ in selected]
                 chunk_start = start
                 while chunk_start < end:
                     chunk_end = min(chunk_start + timedelta(days=GOOGLE_FREEBUSY_CHUNK_DAYS), end)
-                    payload = {
-                        "timeMin": chunk_start.isoformat(), "timeMax": chunk_end.isoformat(),
-                        "timeZone": app.config["APP_TIMEZONE"], "items": [{"id": "primary"}],
-                    }
-                    response = requests.post(
-                        "https://www.googleapis.com/calendar/v3/freeBusy",
-                        headers={"Authorization": f"Bearer {token}"}, json=payload,
-                        timeout=(3.05, 15),
-                    )
-                    if response.status_code == 401 and secret.get("refresh_token"):
-                        refresh = requests.post(
-                            "https://oauth2.googleapis.com/token",
-                            data={
-                                "client_id": app.config["GOOGLE_CLIENT_ID"],
-                                "client_secret": app.config["GOOGLE_CLIENT_SECRET"],
-                                "refresh_token": secret["refresh_token"],
-                                "grant_type": "refresh_token",
-                            }, timeout=(3.05, 15),
-                        )
-                        refresh.raise_for_status()
-                        token = refresh.json().get("access_token")
-                        if not token:
-                            raise ValueError("Google Calendar authorization needs to be reconnected.")
-                        secret["access_token"] = token
-                        db.calendar_connections.update_one(
-                            {"_id": connection["_id"]},
-                            {"$set": {"secret_ciphertext": encrypt_calendar_secret(secret)}},
-                        )
+                    for offset in range(0, len(selected), 50):
+                        batch = selected[offset:offset + 50]
+                        payload = {
+                            "timeMin": chunk_start.isoformat(), "timeMax": chunk_end.isoformat(),
+                            "timeZone": app.config["APP_TIMEZONE"],
+                            "items": [{"id": item["id"]} for item in batch],
+                        }
                         response = requests.post(
                             "https://www.googleapis.com/calendar/v3/freeBusy",
                             headers={"Authorization": f"Bearer {token}"}, json=payload,
                             timeout=(3.05, 15),
                         )
-                    response.raise_for_status()
-                    calendar_result = response.json().get("calendars", {}).get("primary")
-                    if not calendar_result or calendar_result.get("errors"):
-                        raise ValueError("Google Calendar did not return primary calendar availability.")
-                    intervals.extend(
-                        normalized_interval(item["start"], item["end"])
-                        for item in calendar_result.get("busy", [])
-                    )
+                        if response.status_code == 401 and secret.get("refresh_token"):
+                            token = refresh_google_access(secret, connection)
+                            response = requests.post(
+                                "https://www.googleapis.com/calendar/v3/freeBusy",
+                                headers={"Authorization": f"Bearer {token}"}, json=payload,
+                                timeout=(3.05, 15),
+                            )
+                        response.raise_for_status()
+                        calendar_results = response.json().get("calendars", {})
+                        for index, calendar in enumerate(batch, start=offset):
+                            result = calendar_results.get(calendar["id"])
+                            if not result or result.get("errors"):
+                                raise ValueError("A selected Google calendar could not provide availability.")
+                            sources[index].extend(normalized_interval(item["start"], item["end"])
+                                                  for item in result.get("busy", []))
                     chunk_start = chunk_end
+                sources = [merge_calendar_intervals(items) for items in sources]
+                intervals = merge_calendar_intervals([item for items in sources for item in items])
+                secret["selected_calendars"] = selected
             else:
                 raise ValueError("Unsupported calendar provider.")
+            update = {
+                "busy_intervals": intervals,
+                "cache_start": start, "cache_end": end,
+                "last_synced_at": utc_now(),
+                "sync_status": "connected", "sync_error": None,
+            }
+            if connection["provider"] == "google":
+                update["busy_sources"] = [{"busy_intervals": items} for items in sources]
+                update["secret_ciphertext"] = encrypt_calendar_secret(secret)
             db.calendar_connections.update_one(
                 {"_id": connection["_id"]},
-                {"$set": {
-                    "busy_intervals": intervals,
-                    "cache_start": start, "cache_end": end,
-                    "last_synced_at": utc_now(),
-                    "sync_status": "connected",
-                    "sync_error": None,
-                }},
+                {"$set": update},
             )
             return True
         except Exception as exc:
@@ -1203,9 +1256,9 @@ def create_app(database_override=None):
         seen_accounts = set()
         for member in db.users.find(
             {"_id": {"$in": member_ids if member_ids is not None else group.get("member_ids", [])}},
-            {"linked_account_id": 1, "account_id": 1},
+            {"linked_account_id": 1},
         ):
-            account_id = member.get("linked_account_id") or member.get("account_id")
+            account_id = member.get("linked_account_id")
             if account_id and account_id not in seen_accounts:
                 seen_accounts.add(account_id)
                 warnings.extend(ensure_calendar_fresh(account_id, mode, start=start, end=end))
@@ -1308,6 +1361,7 @@ def create_app(database_override=None):
             "google_sub": claims["sub"],
             "google_email": claims["email"],
             "google_email_verified": True,
+            "google_name": claims["name"],
             "updated_at": utc_now(),
         }
         if account_email == claims["email"]:
@@ -1444,7 +1498,7 @@ def create_app(database_override=None):
         username = str(getattr(current_user, "username", "") or "").strip()
         if username and not username_error(username):
             return None
-        allowed = {"complete_username", "logout", "static", "google_callback"}
+        allowed = {"complete_username", "logout", "static", "google_callback", "privacy"}
         if request.endpoint not in allowed:
             return redirect(url_for("complete_username"))
         return None
@@ -1639,6 +1693,7 @@ def create_app(database_override=None):
             "google_sub": claims["sub"],
             "google_email": claims["email"],
             "google_email_verified": True,
+            "google_name": claims["name"],
             "email": claims["email"],
             "normalized_email": claims["email"],
             "email_normalized": claims["email"],
@@ -1713,9 +1768,16 @@ def create_app(database_override=None):
             return redirect(url_for("account"))
         secret = {
             key: token[key]
-            for key in ("access_token", "refresh_token", "expires_at", "token_type")
+            for key in ("access_token", "refresh_token", "expires_at", "token_type", "scope")
             if token.get(key)
         }
+        required_list_scope = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        granted_scopes = secret.get("scope") or []
+        if isinstance(granted_scopes, str):
+            granted_scopes = granted_scopes.split()
+        if granted_scopes and required_list_scope not in granted_scopes:
+            flash("Calendar list permission was not granted. Your existing connection is unchanged.", "error")
+            return redirect(url_for("account"))
         if not secret.get("access_token"):
             flash("Google Calendar did not return usable authorization.", "error")
             return redirect(url_for("account"))
@@ -1726,11 +1788,19 @@ def create_app(database_override=None):
         )
         if existing and not secret.get("refresh_token"):
             try:
-                secret["refresh_token"] = decrypt_calendar_secret(
-                    existing["secret_ciphertext"]
-                ).get("refresh_token")
+                old_secret = decrypt_calendar_secret(existing["secret_ciphertext"])
+                secret["refresh_token"] = old_secret.get("refresh_token")
             except (KeyError, ValueError):
                 pass
+        if existing:
+            try:
+                old_secret = decrypt_calendar_secret(existing["secret_ciphertext"])
+                secret["selected_calendars"] = old_secret.get("selected_calendars", [{"id": "primary", "name": "Primary calendar"}])
+            except (KeyError, ValueError):
+                pass
+        if not secret.get("refresh_token"):
+            flash("Google Calendar did not grant ongoing access. Please try connecting it again.", "error")
+            return redirect(url_for("account"))
         db.calendar_connections.update_one(
             {"account_id": current_account_id(), "provider": "google"},
             {"$set": {
@@ -1746,10 +1816,53 @@ def create_app(database_override=None):
             {"account_id": current_account_id(), "provider": "google"}
         )
         if sync_calendar_connection(connection):
-            flash("Google Calendar connected and synced.", "success")
+            flash("Google Calendar connected. Choose the calendars that should affect availability.", "success")
         else:
-            flash("Google Calendar was connected, but could not be synced yet.", "error")
-        return redirect(url_for("account"))
+            flash("Google Calendar connected, but its calendars could not be synced yet.", "error")
+        return redirect(url_for("google_calendar_selection"))
+
+    @app.route("/account/calendars/google/selection", methods=["GET", "POST"])
+    @login_required
+    def google_calendar_selection():
+        db = require_database()
+        connection = db.calendar_connections.find_one({
+            "account_id": current_account_id(), "provider": "google",
+        })
+        if not connection:
+            return redirect(url_for("google_calendar_auth"))
+        try:
+            secret = decrypt_calendar_secret(connection["secret_ciphertext"])
+            calendars = google_calendar_list(connection, secret)
+        except Exception as exc:
+            if getattr(getattr(exc, "response", None), "status_code", None) == 403:
+                granted_scopes = secret.get("scope") or []
+                if isinstance(granted_scopes, str):
+                    granted_scopes = granted_scopes.split()
+                if "https://www.googleapis.com/auth/calendar.calendarlist.readonly" not in granted_scopes:
+                    flash("Grant calendar list access to choose Google calendars.", "error")
+                    return redirect(url_for("google_calendar_auth"))
+                flash("Google denied calendar list access. Check this account's permissions.", "error")
+                return redirect(url_for("account"))
+            app.logger.warning("Google calendar list failed: category=%s", type(exc).__name__)
+            flash("Google calendars could not be listed right now. Your saved availability is unchanged.", "error")
+            return redirect(url_for("account"))
+        chosen = secret.get("selected_calendars") or [{"id": "primary"}]
+        selected_ids = {item["id"] for item in chosen}
+        if "primary" in selected_ids:
+            selected_ids.update(item["id"] for item in calendars if item["primary"])
+        if request.method == "POST":
+            requested_ids = list(dict.fromkeys(request.form.getlist("calendar_id")))
+            available = {item["id"]: item for item in calendars}
+            if not requested_ids or any(item not in available for item in requested_ids):
+                flash("Select at least one calendar from the list.", "error")
+                return render_template("google_calendar_selection.html", calendars=calendars, selected_ids=set(requested_ids)), 400
+            selected = [{"id": item, "name": available[item]["name"]} for item in requested_ids]
+            if not sync_calendar_connection(connection, selected_calendars=selected):
+                flash("Selected calendars could not all sync. Your previous busy times were kept.", "error")
+                return redirect(url_for("google_calendar_selection"))
+            flash("Google calendar selection saved and synced.", "success")
+            return redirect(url_for("account"))
+        return render_template("google_calendar_selection.html", calendars=calendars, selected_ids=selected_ids)
 
     @app.post("/account/calendars/ical")
     @login_required
@@ -1834,6 +1947,20 @@ def create_app(database_override=None):
         if not document:
             abort(404)
         connections = list(db.calendar_connections.find({"account_id": current_account_id()}))
+        zone = ZoneInfo(app.config["APP_TIMEZONE"])
+        for connection in connections:
+            if connection.get("provider") == "google":
+                try:
+                    selected = decrypt_calendar_secret(connection["secret_ciphertext"]).get(
+                        "selected_calendars", [{"name": "Primary calendar"}]
+                    )
+                except (KeyError, ValueError):
+                    selected = []
+                connection["selected_names"] = [item.get("name", "Google Calendar") for item in selected]
+            start = aware_utc(as_datetime(connection.get("cache_start")))
+            end = aware_utc(as_datetime(connection.get("cache_end")))
+            if start and end:
+                connection["sync_range"] = f"{start.astimezone(zone).date().strftime('%b %d')}–{(end - timedelta(microseconds=1)).astimezone(zone).date().strftime('%b %d')}"
         return render_template(
             "account.html",
             account=document,
@@ -1872,7 +1999,7 @@ def create_app(database_override=None):
                 flash("That username is already taken.", "error")
                 return render_template("complete_username.html", username=username), 400
             flash("Your account setup is complete.", "success")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("account", calendar_prompt="1"))
         return render_template("complete_username.html", username=username)
 
     @app.route("/account/username", methods=["GET", "POST"])
@@ -2005,6 +2132,7 @@ def create_app(database_override=None):
                 "google_sub": "",
                 "google_email": "",
                 "google_email_verified": "",
+                "google_name": "",
             }, "$pull": {"auth_methods": "google"}, "$set": {"updated_at": utc_now()}},
         )
         flash("Google was disconnected. Your password remains active.", "success")
@@ -2331,6 +2459,10 @@ def create_app(database_override=None):
             week_start = date.today()
         week_start -= timedelta(days=week_start.weekday())
         week_dates = [week_start + timedelta(days=index) for index in range(7)]
+        calendar_warnings = ensure_group_calendars_fresh(
+            group, mode="view", start_date=week_dates[0].isoformat(),
+            end_date=week_dates[-1].isoformat(),
+        )
         account_by_member = {
             str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
             for member in members
@@ -2435,6 +2567,7 @@ def create_app(database_override=None):
             group=group,
             members=members,
             availability_days=week_dates,
+            calendar_warnings=calendar_warnings,
             week_start=week_start,
             week_end=week_dates[-1],
             previous_week=(week_start - timedelta(days=7)).isoformat(),
@@ -2918,10 +3051,78 @@ def create_app(database_override=None):
                 [("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
         )
+        zone = ZoneInfo(app.config["APP_TIMEZONE"])
+        try:
+            week_start = date.fromisoformat(request.args.get("week_start", ""))
+        except ValueError:
+            week_start = utc_now().astimezone(zone).date()
+        week_start -= timedelta(days=week_start.weekday())
+        week_dates = [week_start + timedelta(days=index) for index in range(7)]
+        linked_account_id = user.get("linked_account_id")
+        calendar_warnings = ensure_calendar_fresh(
+            linked_account_id, mode="view",
+            start=datetime.combine(week_dates[0], datetime.min.time(), zone).astimezone(timezone.utc),
+            end=datetime.combine(week_dates[-1] + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc),
+        ) if linked_account_id else []
+        connections = list(db.calendar_connections.find({
+            "account_id": linked_account_id,
+            "provider": {"$in": ["google", "ical"]},
+            "$or": [{"sync_status": "connected"}, {"last_synced_at": {"$exists": True}}],
+        })) if linked_account_id else []
+        calendar_sources = []
+        busy_intervals = []
+        source_name_counts = {}
+        for connection in connections:
+            busy_intervals.extend(connection.get("busy_intervals", []))
+            show_names = auth_bypass() or linked_account_id == current_account_id()
+            if connection.get("provider") == "google":
+                try:
+                    chosen = decrypt_calendar_secret(connection["secret_ciphertext"]).get("selected_calendars", [])
+                except (KeyError, ValueError):
+                    chosen = []
+                source_intervals = [item.get("busy_intervals", []) for item in connection.get("busy_sources", [])]
+                if not source_intervals:
+                    source_intervals = [connection.get("busy_intervals", [])]
+                names = [item.get("name", "Google Calendar") for item in chosen] or ["Google Calendar"]
+            else:
+                source_intervals = [connection.get("busy_intervals", [])]
+                names = [connection.get("display_name") or "iCal calendar"]
+            for index, intervals in enumerate(source_intervals):
+                name = names[index] if show_names and index < len(names) else "Connected calendar"
+                source_name_counts[name] = source_name_counts.get(name, 0) + 1
+                calendar_sources.append({
+                    "id": f"{connection['_id']}-{index}",
+                    "name": f"{name} ({source_name_counts[name]})" if source_name_counts[name] > 1 else name,
+                    "color": len(calendar_sources) % 6,
+                    "days": {
+                        current.isoformat(): [{
+                            "start_minutes": start.hour * 60 + start.minute,
+                            "end_minutes": end.hour * 60 + end.minute if end.date() == current else 1440,
+                        } for start, end in calendar_busy_for_date(
+                            intervals, current, app.config["APP_TIMEZONE"]
+                        )]
+                        for current in week_dates
+                    },
+                })
+        effective_days = [
+            {"date": current, "windows": effective_availability_for_date(
+                entries, user["_id"], current,
+                calendar_busy_intervals=busy_intervals,
+                timezone_name=app.config["APP_TIMEZONE"],
+            )}
+            for current in week_dates
+        ]
         return render_template(
             "member_availability.html",
             user=user,
             entries=entries,
+            effective_days=effective_days,
+            calendar_sources=calendar_sources,
+            calendar_warnings=calendar_warnings,
+            previous_week=(week_start - timedelta(days=7)).isoformat(),
+            next_week=(week_start + timedelta(days=7)).isoformat(),
+            week_start=week_start,
+            week_end=week_dates[-1],
             days=DAYS,
             return_to=return_to,
             return_label=return_label,

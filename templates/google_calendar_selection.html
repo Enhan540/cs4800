@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Choose Google calendars | Group Planner{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('account') }}">← Back to Account</a>
+<section class="card account-section"><p class="eyebrow">Google Calendar</p><h1>Choose calendars</h1><p class="muted">Select the calendars whose busy times should reduce your availability. Group Planner reads only busy times, never event titles or details.</p>
+  <form method="post" class="auth-form">
+    {% for calendar in calendars %}<label class="permission-row"><input type="checkbox" name="calendar_id" value="{{ calendar.id }}"{% if calendar.id in selected_ids %} checked{% endif %}> {{ calendar.name }}{% if calendar.primary %} (primary){% endif %}</label>{% endfor %}
+    {% if calendars %}<button class="button" type="submit">Save and sync calendars</button>{% else %}<p>No calendars with free/busy access were found in this Google account.</p>{% endif %}
+  </form>
+</section>
+{% endblock %}

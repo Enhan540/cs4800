@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Privacy Policy | Group Planner{% endblock %}
+{% block content %}
+<section class="card"><h1>Privacy Policy</h1><p>Group Planner helps groups find meeting times and manage invitations. This page explains the information the app uses.</p>
+<h2>Account information</h2><p>When you sign in with Google, Group Planner receives your Google account identifier, verified email address, and name. We use these to create and secure your account and show your identity in the app. Google sign-in does not grant calendar access.</p>
+<h2>Calendar information</h2><p>If you choose to connect Google Calendar, Group Planner lists calendars you can access and lets you choose which calendars contribute free and busy times. We store encrypted authorization credentials, selected calendar identifiers and names, and calculated busy time intervals for scheduling. We do not request event titles, descriptions, or guests, and do not change your calendars. Other group members see availability results, not your calendar names or event details.</p>
+<h2>Other information</h2><p>Group Planner stores the profile, group, availability, plan, invitation, and RSVP information you provide. It uses this information to run the scheduling service and display it to the relevant group members.</p>
+<h2>Your choices</h2><p>You can disconnect Google sign-in when another sign-in method is available, and disconnect Google Calendar in Account settings. Disconnecting a calendar removes its stored connection and cached busy times. You can also revoke Group Planner's access in your Google Account permissions.</p>
+<h2>Contact</h2><p>For privacy questions, {% if support_email %}email <a href="mailto:{{ support_email }}">{{ support_email }}</a>{% else %}use the support address shown on the Group Planner Google consent screen{% endif %}.</p></section>
+{% endblock %}

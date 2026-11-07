@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 
 from services.availability_service import (
+    calendar_busy_for_date,
     effective_availability_for_date,
     group_availability_blocks,
     group_availability_counts,
@@ -14,6 +15,25 @@ def records():
 
 def pairs(intervals):
     return [(item[0].strftime("%H:%M"), item[1].strftime("%H:%M")) for item in intervals]
+
+
+def test_calendar_masks_follow_local_dates_across_daylight_saving_week():
+    intervals = [{"start": datetime(2026, 11, 1, 18, tzinfo=timezone.utc),
+                  "end": datetime(2026, 11, 1, 19, tzinfo=timezone.utc)}]
+    assert pairs(calendar_busy_for_date(
+        intervals, date(2026, 11, 1), "America/Los_Angeles"
+    )) == [("10:00", "11:00")]
+    assert calendar_busy_for_date(
+        intervals, date(2026, 10, 31), "America/Los_Angeles"
+    ) == []
+
+
+def test_calendar_busy_event_crossing_fall_back_is_not_dropped():
+    intervals = [{"start": datetime(2026, 11, 1, 8, 30, tzinfo=timezone.utc),
+                  "end": datetime(2026, 11, 1, 9, 30, tzinfo=timezone.utc)}]
+    assert pairs(calendar_busy_for_date(
+        intervals, date(2026, 11, 1), "America/Los_Angeles"
+    )) == [("01:00", "02:00")]
 
 
 def test_effective_availability_subtracts_multiple_calendar_conflicts():

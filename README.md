@@ -4,6 +4,26 @@ Group Planner is the CS4800 Software Engineering with AI MVP for coordinating re
 
 Live application: **replace this text with the deployed Vercel URL** (for example, `https://your-project.vercel.app`). The production URL is intentionally not guessed or committed as a secret.
 
+## Public Google integration setup
+
+The app has separate Google flows. Sign-in requests `openid email profile`; Calendar connection is optional after account creation and requests `https://www.googleapis.com/auth/calendar.events.freebusy` plus `https://www.googleapis.com/auth/calendar.calendarlist.readonly` to let each user select calendars. A new Google user chooses a Group Planner username, then sees a Calendar connection prompt that can be skipped. The Google name and verified email are saved with the account.
+
+In Google Cloud Console, enable Google Calendar API, configure OAuth consent with **External** audience, and create a Web application OAuth client. Set the app name to **Group Planner**, add the app's logo, a monitored support email, and developer contact email. Use the public Vercel homepage as the application home page and `https://<production-host>/privacy` as the privacy policy URL. Declare only the scopes above. Add the exact local and production redirect URIs for both `/auth/google/callback` and `/auth/google-calendar/callback` to the client. Publish the app when ready for external sign-in. Google may restrict unverified Calendar consent; an owned, verified domain and Google's scope review are needed before promising unrestricted public Calendar access.
+
+Set these Vercel production environment variables using the actual deployment host, and redeploy after changing them:
+
+```env
+GOOGLE_CLIENT_ID=<web OAuth client ID>
+GOOGLE_CLIENT_SECRET=<web OAuth client secret>
+GOOGLE_REDIRECT_URI=https://<production-host>/auth/google/callback
+GOOGLE_CALENDAR_REDIRECT_URI=https://<production-host>/auth/google-calendar/callback
+APP_BASE_URL=https://<production-host>
+SESSION_COOKIE_SECURE=true
+SUPPORT_EMAIL=<the support email on the Google consent screen>
+```
+
+Keep the localhost redirect values in `.env` for local development. The Vercel host and OAuth client credentials are account-specific and cannot be safely filled in from this repository. The production homepage and privacy policy must be publicly reachable before entering them in Google Cloud.
+
 ## Problem
 
 Finding a meeting time for a group is often an awkward exchange of messages. People may have different weekly schedules, and a simple list of individual availability does not make the overlap obvious. Group Planner keeps reusable member records, recurring availability, and group plans in one place so a group can identify realistic meeting windows quickly.
@@ -12,7 +32,7 @@ Finding a meeting time for a group is often an awkward exchange of messages. Peo
 
 - Create private accounts with a username and securely hashed password.
 - Sign in with Google using OpenID Connect identity scopes (`openid email profile`) without requesting Google Calendar access.
-- Connect Google Calendar separately, with a dedicated consent flow limited to free/busy data; Google sign-in alone never grants calendar access.
+- Connect Google Calendar separately, with free/busy and read-only calendar-list permissions so users choose which calendars affect availability; Google sign-in alone never grants calendar access.
 - Connect multiple named HTTPS iCalendar/iCal feeds per account alongside Google Calendar. Re-adding a subscription URL updates that feed. Calendar URLs and OAuth tokens are encrypted before storage, feeds are fetched server-side with redirect/size/private-network protections, and only normalized busy intervals are used for scheduling.
 - Keep dashboards, groups, members, availability, and plans scoped to the authenticated account.
 - Support an explicit, idempotent migration that links legacy `guest#` member profiles to authenticated accounts while preserving schedules, memberships, plans, and RSVPs.
@@ -177,12 +197,12 @@ PORT=5000
 
 `FLASK_SECRET_KEY` is accepted as a backwards-compatible alternative to `SECRET_KEY`. Use the same stable `SECRET_KEY` for every instance of one deployment so signed login sessions and encrypted calendar connection secrets remain valid. Different local and production environments may use different keys, but changing a deployed key invalidates existing sessions and requires calendar connections to be reconnected. Set `SESSION_COOKIE_SECURE=true` for HTTPS production deployments; leave it false for plain-HTTP local development. `MONGO_URI`, `SECRET_KEY`, `GOOGLE_CLIENT_SECRET`, OAuth refresh tokens, and calendar-feed URLs must never be committed. `.env` is ignored by Git; `.env.example` contains placeholders only.
 
-For Google Calendar, add the calendar callback above to the same Google OAuth client used for sign-in. The connection requests only `calendar.events.freebusy`, and the application queries the signed-in account's primary calendar. Configure matching local and deployed redirect URIs in Google Cloud Console before attempting a connection.
+For Google Calendar, add the calendar callback above to the same Google OAuth client used for sign-in. The separate Calendar connection requests only free/busy and calendar-list read access. After connecting, choose one or more calendars; the primary calendar is selected by default. Existing connections must reconnect once to grant calendar-list access before choosing additional calendars. Configure matching local and deployed redirect URIs in Google Cloud Console before attempting a connection.
 
 ### Check a calendar connection locally
 
 1. Sign in, open **Account**, connect Google Calendar, and confirm its status is **Connected**. Add two named iCal subscription links and confirm both appear separately.
-2. Put a busy event on the Google primary calendar and a different busy event in each iCal feed. Use **Sync Now** on each connection.
+2. Select the Google calendars to use. Put a busy event on a selected secondary calendar and a different busy event in each iCal feed. Use **Sync Now** on each connection.
 3. Give the linked group member weekly availability spanning those events. Create a plan for their dates and confirm the preview and saved results omit all three busy periods.
 4. Disconnect one feed and repeat the preview; only that feed's busy period should become available. Re-add the same URL twice and confirm it creates one connection.
 5. Temporarily make a feed unavailable. If it has a successful cache for the requested dates, planning should show a stale-data warning; if it has never synced those dates, scheduling should be blocked until it syncs or is disconnected.

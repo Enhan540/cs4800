@@ -109,10 +109,37 @@ def _day_clipped_conflicts(intervals, current, *, calendar_timezone=None):
         else:
             start = calendar_value_as_local_naive(raw_start, calendar_timezone)
             end = calendar_value_as_local_naive(raw_end, calendar_timezone)
+            utc_start, utc_end = as_utc_naive(raw_start), as_utc_naive(raw_end)
+            if start and end and utc_start and utc_end and utc_end > utc_start and end <= start:
+                zone = timezone_info(calendar_timezone)
+                left = utc_start.replace(tzinfo=timezone.utc)
+                right = utc_end.replace(tzinfo=timezone.utc)
+                before_offset = left.astimezone(zone).utcoffset()
+                after_offset = right.astimezone(zone).utcoffset()
+                if after_offset < before_offset:
+                    while right - left > timedelta(microseconds=1):
+                        middle = left + (right - left) / 2
+                        if middle.astimezone(zone).utcoffset() == before_offset:
+                            left = middle
+                        else:
+                            right = middle
+                    transition = right.replace(tzinfo=None)
+                    for segment_start, segment_end in (
+                        (start, transition + before_offset),
+                        (transition + after_offset, end),
+                    ):
+                        if segment_end > segment_start and segment_end > day_start and segment_start < day_end:
+                            clipped.append((max(segment_start, day_start), min(segment_end, day_end)))
+                continue
         if not start or not end or end <= start or end <= day_start or start >= day_end:
             continue
         clipped.append((max(start, day_start), min(end, day_end)))
     return merge_intervals(clipped)
+
+
+def calendar_busy_for_date(intervals, current, timezone_name="UTC"):
+    """Return only local start/end times for one date, without event metadata."""
+    return _day_clipped_conflicts(intervals, current, calendar_timezone=timezone_name)
 
 
 def effective_availability_for_date(

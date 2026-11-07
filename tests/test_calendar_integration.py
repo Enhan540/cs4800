@@ -112,6 +112,77 @@ def test_google_and_ical_busy_times_are_both_subtracted(calendar_app, monkeypatc
     assert database.calendar_connections.count_documents({"sync_status": "connected"}) == 2
 
 
+def test_google_busy_time_updates_group_and_member_views(calendar_app, monkeypatch):
+    app, database = calendar_app
+    account, member, group = planning_group(database)
+    database.calendar_connections.insert_one({
+        "account_id": account, "provider": "google", "sync_status": "pending",
+        "secret_ciphertext": encrypted({"access_token": "test-token", "refresh_token": "refresh"}),
+    })
+    monkeypatch.setattr("app.requests.post", lambda *_args, **_kwargs: FreeBusyResponse([{
+        "start": "2026-11-02T18:00:00Z", "end": "2026-11-02T19:00:00Z",
+    }]))
+
+    group_page = app.test_client().get(f"/groups/{group}?week_start=2026-11-02").get_data(as_text=True)
+    member_page = app.test_client().get(
+        f"/users/{member}/availability?week_start=2026-11-02"
+    ).get_data(as_text=True)
+
+    assert "member-overlay-conflict" in group_page
+    assert 'data-calendar-mask' in member_page
+    assert 'data-start-minute="600" data-end-minute="660"' in member_page
+    assert 'aria-label="Actually free on Monday, November 2 from 9:00 AM to 10:00 AM"' in member_page
+    assert 'aria-label="Actually free on Monday, November 2 from 11:00 AM to 12:00 PM"' in member_page
+
+
+def test_member_chart_keeps_calendar_sources_separate_and_private(calendar_app):
+    app, database = calendar_app
+    account, member, _group = planning_group(database)
+    cached = {
+        "account_id": account, "sync_status": "connected",
+        "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+    }
+    database.calendar_connections.insert_many([
+        {**cached, "provider": "google", "busy_intervals": [{
+            "start": datetime(2026, 11, 2, 18), "end": datetime(2026, 11, 2, 19),
+            "summary": "Private doctor visit",
+        }]},
+        {**cached, "provider": "ical", "display_name": "School", "busy_intervals": [{
+            "start": datetime(2026, 11, 2, 18, 30), "end": datetime(2026, 11, 2, 19, 30),
+        }]},
+    ])
+    page = app.test_client().get(
+        f"/users/{member}/availability?week_start=2026-11-02"
+    ).get_data(as_text=True)
+
+    assert "Google Calendar" in page and "School" in page
+    assert 'data-start-minute="600" data-end-minute="660"' in page
+    assert 'data-start-minute="630" data-end-minute="690"' in page
+    assert 'aria-label="Actually free on Monday, November 2 from 11:30 AM to 12:00 PM"' in page
+    assert "Private doctor visit" not in page
+
+
+def test_member_chart_shows_busy_time_outside_recurring_window(calendar_app):
+    app, database = calendar_app
+    account, member, _group = planning_group(database)
+    database.calendar_connections.insert_one({
+        "account_id": account, "provider": "google", "sync_status": "connected",
+        "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+        "busy_intervals": [{"start": datetime(2026, 11, 2, 14),
+                            "end": datetime(2026, 11, 2, 15)}],
+    })
+    page = app.test_client().get(
+        f"/users/{member}/availability?week_start=2026-11-02"
+    ).get_data(as_text=True)
+
+    assert 'data-start-minute="360" data-end-minute="420"' in page
+    assert 'aria-label="Actually free on Monday, November 2 from 9:00 AM to 12:00 PM"' in page
+
+
 def test_failed_refresh_uses_covered_cache_and_warns(calendar_app, monkeypatch):
     app, database = calendar_app
     account, _member, group = planning_group(database)
@@ -339,7 +410,266 @@ def test_google_reconnect_keeps_refresh_token(calendar_app, monkeypatch):
     connection = database.calendar_connections.find_one({"account_id": account["_id"]})
     key = base64.urlsafe_b64encode(hashlib.sha256(b"test-secret").digest())
     saved = json.loads(Fernet(key).decrypt(connection["secret_ciphertext"].encode()))
-    assert saved == {"access_token": "second", "refresh_token": "durable-refresh"}
+    assert saved == {"access_token": "second", "refresh_token": "durable-refresh",
+                     "selected_calendars": [{"id": "primary", "name": "Primary calendar"}]}
+
+
+def test_select_secondary_google_calendar_and_preserve_cache_on_failure(calendar_app, monkeypatch):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "calendar-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    account = database.accounts.find_one({"normalized_username": "calendar-owner"})
+    member = database.users.insert_one({
+        "display_name": "Calendar Owner", "account_id": account["_id"],
+        "linked_account_id": account["_id"],
+    }).inserted_id
+    database.availability.insert_one({
+        "user_id": member, "day": "Monday", "start_time": "09:00", "end_time": "12:00",
+    })
+    connection_id = database.calendar_connections.insert_one({
+        "account_id": account["_id"], "provider": "google", "sync_status": "pending",
+        "secret_ciphertext": encrypted({"access_token": "access", "refresh_token": "refresh"}),
+    }).inserted_id
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    monkeypatch.setattr("app.requests.get", lambda *_args, **_kwargs: Response({"items": [
+        {"id": "primary@example.com", "summary": "Primary", "primary": True},
+        {"id": "school@example.com", "summary": "School", "primary": False},
+    ]}))
+    failed = False
+
+    def freebusy(_url, **kwargs):
+        items = kwargs["json"]["items"]
+        return Response({"calendars": {
+            item["id"]: ({"errors": [{"reason": "notFound"}]} if failed else {
+                "busy": [{"start": "2026-11-02T18:00:00Z", "end": "2026-11-02T19:00:00Z"}]
+                if item["id"] == "school@example.com" else []
+            }) for item in items
+        }})
+
+    monkeypatch.setattr("app.requests.post", freebusy)
+    chooser = client.get("/account/calendars/google/selection")
+    assert b"School" in chooser.data and b"Primary" in chooser.data
+    invalid = client.post("/account/calendars/google/selection", data={"calendar_id": "unlisted@example.com"})
+    assert invalid.status_code == 400
+    assert database.calendar_connections.find_one({"_id": connection_id})["sync_status"] == "pending"
+    response = client.post("/account/calendars/google/selection", data={"calendar_id": "school@example.com"})
+    assert response.status_code == 302
+    connection = database.calendar_connections.find_one({"_id": connection_id})
+    saved = json.loads(Fernet(base64.urlsafe_b64encode(hashlib.sha256(b"test-secret").digest())).decrypt(
+        connection["secret_ciphertext"].encode()))
+    assert saved["selected_calendars"] == [{"id": "school@example.com", "name": "School"}]
+    assert len(connection["busy_intervals"]) == 1
+    assert len(connection["busy_sources"]) == 1
+    page = client.get(f"/users/{member}/availability?week_start=2026-11-02").get_data(as_text=True)
+    assert "School busy" in page
+
+    failed = True
+    client.post("/account/calendars/google/selection", data={
+        "calendar_id": ["primary@example.com", "school@example.com"],
+    })
+    unchanged = database.calendar_connections.find_one({"_id": connection_id})
+    assert unchanged["busy_intervals"] == connection["busy_intervals"]
+    assert unchanged["busy_sources"] == connection["busy_sources"]
+    saved_after_failure = json.loads(Fernet(base64.urlsafe_b64encode(hashlib.sha256(b"test-secret").digest())).decrypt(
+        unchanged["secret_ciphertext"].encode()))
+    assert saved_after_failure["selected_calendars"] == saved["selected_calendars"]
+
+
+def test_multiple_selected_google_calendars_merge_for_scheduling(calendar_app, monkeypatch):
+    app, database = calendar_app
+    account, member, group = planning_group(database)
+    database.calendar_connections.insert_one({
+        "account_id": account, "provider": "google", "sync_status": "pending",
+        "secret_ciphertext": encrypted({
+            "access_token": "access", "refresh_token": "refresh",
+            "selected_calendars": [
+                {"id": "primary", "name": "Primary"},
+                {"id": "school@example.com", "name": "School"},
+            ],
+        }),
+    })
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"calendars": {
+                "primary": {"busy": [{"start": "2026-11-02T17:30:00Z", "end": "2026-11-02T18:30:00Z"}]},
+                "school@example.com": {"busy": [{"start": "2026-11-02T18:00:00Z", "end": "2026-11-02T19:30:00Z"}]},
+            }}
+
+    monkeypatch.setattr("app.requests.post", lambda *_args, **_kwargs: Response())
+    response = preview(app.test_client(), group)
+    connection = database.calendar_connections.find_one({"account_id": account})
+
+    assert response.status_code == 200
+    assert len(connection["busy_sources"]) == 2
+    assert len(connection["busy_intervals"]) == 1
+    assert connection["busy_intervals"][0]["start"] == datetime(2026, 11, 2, 17, 30)
+    assert connection["busy_intervals"][0]["end"] == datetime(2026, 11, 2, 19, 30)
+    assert {item["start"] for item in response.get_json()["results"]} == {"09:00", "11:30"}
+
+
+def test_other_group_owner_sees_busy_mask_without_calendar_name(calendar_app):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "group-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    owner = database.accounts.find_one({"normalized_username": "group-owner"})
+    member_account = database.accounts.insert_one({"username": "member"}).inserted_id
+    member = database.users.insert_one({
+        "display_name": "Member", "linked_account_id": member_account,
+    }).inserted_id
+    database.groups.insert_one({
+        "name": "Group", "owner_account_id": owner["_id"],
+        "account_ids": [owner["_id"]], "member_ids": [member],
+    })
+    database.availability.insert_one({
+        "user_id": member, "day": "Monday", "start_time": "09:00", "end_time": "12:00",
+    })
+    interval = {"start": datetime(2026, 11, 2, 18), "end": datetime(2026, 11, 2, 19)}
+    database.calendar_connections.insert_one({
+        "account_id": member_account, "provider": "google", "sync_status": "connected",
+        "secret_ciphertext": encrypted({
+            "access_token": "access", "refresh_token": "refresh",
+            "selected_calendars": [{"id": "school@example.com", "name": "Private School Calendar"}],
+        }),
+        "busy_sources": [{"busy_intervals": [interval]}], "busy_intervals": [interval],
+        "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+    })
+
+    page = client.get(f"/users/{member}/availability?week_start=2026-11-02").get_data(as_text=True)
+    assert "Connected calendar busy" in page
+    assert "Private School Calendar" not in page
+    assert "school@example.com" not in page
+
+
+def test_created_member_does_not_inherit_creators_calendar(calendar_app):
+    app, database = calendar_app
+    account = database.accounts.insert_one({"username": "owner"}).inserted_id
+    member = database.users.insert_one({
+        "display_name": "Another person", "account_id": account,
+    }).inserted_id
+    group = database.groups.insert_one({"name": "Group", "member_ids": [member]}).inserted_id
+    database.availability.insert_one({
+        "user_id": member, "day": "Monday", "start_time": "09:00", "end_time": "12:00",
+    })
+    database.calendar_connections.insert_one({
+        "account_id": account, "provider": "google", "sync_status": "connected",
+        "busy_intervals": [{"start": datetime(2026, 11, 2, 17),
+                            "end": datetime(2026, 11, 2, 20)}],
+    })
+    response = preview(app.test_client(), group)
+    assert response.status_code == 200
+    assert response.get_json()["results"][0]["start"] == "09:00"
+
+
+def test_google_calendar_requires_refresh_token_for_new_connection(calendar_app):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "calendar-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    account = database.accounts.find_one({"normalized_username": "calendar-owner"})
+
+    class OAuthClient:
+        def authorize_access_token(self):
+            return {"access_token": "temporary-only"}
+
+    app.extensions["google_calendar_oauth_client"] = OAuthClient()
+    with client.session_transaction() as oauth_session:
+        oauth_session["google_calendar_oauth_state"] = "state"
+        oauth_session["google_calendar_oauth_account_id"] = str(account["_id"])
+    response = client.get("/auth/google-calendar/callback?state=state", follow_redirects=True)
+
+    assert b"did not grant ongoing access" in response.data
+    assert database.calendar_connections.count_documents({"account_id": account["_id"]}) == 0
+
+
+def test_calendar_reauthorization_denial_keeps_existing_connection(calendar_app):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "calendar-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    account = database.accounts.find_one({"normalized_username": "calendar-owner"})
+    connection_id = database.calendar_connections.insert_one({
+        "account_id": account["_id"], "provider": "google", "sync_status": "connected",
+        "secret_ciphertext": encrypted({"access_token": "old", "refresh_token": "old-refresh"}),
+        "busy_intervals": [{"start": datetime(2026, 11, 2, 18), "end": datetime(2026, 11, 2, 19)}],
+    }).inserted_id
+    before = database.calendar_connections.find_one({"_id": connection_id})
+    with client.session_transaction() as oauth_session:
+        oauth_session["google_calendar_oauth_state"] = "state"
+        oauth_session["google_calendar_oauth_account_id"] = str(account["_id"])
+    denied = client.get("/auth/google-calendar/callback?state=state&error=access_denied")
+    assert denied.status_code == 302
+    assert database.calendar_connections.find_one({"_id": connection_id}) == before
+
+    class OAuthClient:
+        def authorize_access_token(self):
+            return {"access_token": "new", "refresh_token": "new-refresh",
+                    "scope": "https://www.googleapis.com/auth/calendar.events.freebusy"}
+
+    app.extensions["google_calendar_oauth_client"] = OAuthClient()
+    with client.session_transaction() as oauth_session:
+        oauth_session["google_calendar_oauth_state"] = "state"
+        oauth_session["google_calendar_oauth_account_id"] = str(account["_id"])
+    missing_scope = client.get("/auth/google-calendar/callback?state=state")
+    assert missing_scope.status_code == 302
+    assert database.calendar_connections.find_one({"_id": connection_id}) == before
+
+
+def test_empty_successful_google_sync_is_explained_on_account_page(calendar_app):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "calendar-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    account = database.accounts.find_one({"normalized_username": "calendar-owner"})
+    database.calendar_connections.insert_one({
+        "account_id": account["_id"], "provider": "google", "sync_status": "connected",
+        "secret_ciphertext": encrypted({"access_token": "access", "refresh_token": "refresh",
+                                        "selected_calendars": [{"id": "school@example.com", "name": "School"}]}),
+        "busy_intervals": [],
+        "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+    })
+    page = client.get("/account").get_data(as_text=True)
+    assert "0 busy periods found" in page
+    assert "Selected: School" in page
+    assert "Choose calendars" in page
 
 
 def test_google_callback_rejects_session_from_another_account(calendar_app):

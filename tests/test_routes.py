@@ -357,6 +357,9 @@ def test_group_availability_maps_week_dates_and_hides_calendar_event_details(app
     })
     database.calendar_connections.insert_one({
         "account_id": account_id, "provider": "ical", "sync_status": "connected",
+        "last_synced_at": datetime.now(timezone.utc),
+        "cache_start": datetime(2026, 10, 26, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 3, tzinfo=timezone.utc),
         "busy_intervals": [{
             "start": datetime(2026, 10, 31, 1), "end": datetime(2026, 10, 31, 2, 30),
             "summary": "Private event that must not be exposed",
@@ -396,6 +399,9 @@ def test_group_page_order_dynamic_heatmap_start_and_pacific_ical_count(app_and_d
         "account_id": guest2_account,
         "provider": "ical",
         "sync_status": "connected",
+        "last_synced_at": datetime.now(timezone.utc),
+        "cache_start": datetime(2026, 10, 26, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 3, tzinfo=timezone.utc),
         "busy_intervals": [{
             "start": datetime(2026, 10, 26, 16),
             "end": datetime(2026, 10, 26, 16, 50),

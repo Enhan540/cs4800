@@ -674,7 +674,45 @@ document.addEventListener("DOMContentLoaded", () => {
       "[data-availability-window], [data-availability-window-readonly]",
     )) : [];
   };
+  const mergeAvailabilityRanges = (ranges) => ranges.sort((a, b) => a[0] - b[0]).reduce((merged, range) => {
+    if (range[1] <= range[0]) return merged;
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+    return merged;
+  }, []);
+  const chartTime = (minutes) => minutes === 1440 ? "12:00 A.M." : formatTime(minutes);
+  const refreshCombinedAvailability = (day) => {
+    const column = availabilityColumnForDay(day);
+    const track = column?.querySelector(".calendar-day-track");
+    if (!track) return;
+    const baseline = mergeAvailabilityRanges(availabilityBlocksForDay(day).map((block) => [
+      availabilityMinutes(block.dataset.startTime), availabilityMinutes(block.dataset.endTime),
+    ]).filter(([start, end]) => start !== null && end !== null));
+    const busy = mergeAvailabilityRanges(Array.from(track.querySelectorAll("[data-calendar-mask]"))
+      .map((mask) => [Number(mask.dataset.startMinute), Number(mask.dataset.endMinute)]));
+    let free = baseline;
+    busy.forEach(([start, end]) => {
+      free = free.flatMap(([left, right]) => {
+        if (end <= left || start >= right) return [[left, right]];
+        return [[left, Math.min(start, right)], [Math.max(end, left), right]]
+          .filter(([a, b]) => b > a);
+      });
+    });
+    track.querySelectorAll("[data-effective-window]").forEach((block) => block.remove());
+    free.forEach(([start, end]) => {
+      const block = document.createElement("span");
+      block.className = "calendar-effective-window";
+      block.dataset.effectiveWindow = "true";
+      block.setAttribute("role", "img");
+      block.setAttribute("aria-label", `Actually free on ${column.dataset.date} from ${chartTime(start)} to ${chartTime(end)}`);
+      block.style.top = `${start / 1440 * 100}%`;
+      block.style.height = `${(end - start) / 1440 * 100}%`;
+      track.appendChild(block);
+    });
+  };
   const refreshAvailabilitySummary = (day) => {
+    refreshCombinedAvailability(day);
     const summary = document.querySelector(`[data-summary-day="${day}"] [data-summary-windows]`);
     if (!summary) return;
     summary.replaceChildren();
@@ -872,6 +910,20 @@ document.addEventListener("DOMContentLoaded", () => {
     showStableDialog(windowDialog);
   };
   const weeklyCalendar = document.querySelector(".weekly-calendar");
+  document.querySelectorAll("[data-calendar-filter]").forEach((button) => button.addEventListener("click", () => {
+    const selected = button.getAttribute("aria-pressed") === "true" ? null : button.dataset.calendarFilter;
+    document.querySelectorAll("[data-calendar-filter]").forEach((item) =>
+      item.setAttribute("aria-pressed", String(item.dataset.calendarFilter === selected)));
+    document.querySelectorAll("[data-calendar-mask]").forEach((mask) => {
+      mask.hidden = Boolean(selected && mask.dataset.calendarSource !== selected);
+    });
+  }));
+  const maskedAvailabilityBlock = (column, clientY) => {
+    const track = column.querySelector(".calendar-day-track");
+    const minute = (clientY - track.getBoundingClientRect().top) / track.getBoundingClientRect().height * 1440;
+    return availabilityBlocksForDay(column.dataset.day).find((block) =>
+      availabilityMinutes(block.dataset.startTime) <= minute && minute < availabilityMinutes(block.dataset.endTime));
+  };
   weeklyCalendar?.addEventListener("click", (event) => {
     const block = event.target.closest("[data-availability-window]");
     if (block) {
@@ -880,6 +932,11 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     const column = event.target.closest("[data-availability-calendar-day]");
+    const mask = event.target.closest("[data-calendar-mask]");
+    if (mask && column) {
+      const underlying = maskedAvailabilityBlock(column, event.clientY);
+      if (underlying?.matches("[data-availability-window]")) { openWindowDialog(underlying); return; }
+    }
     if (column) openDayDialog(column);
   });
   weeklyCalendar?.addEventListener("keydown", (event) => {

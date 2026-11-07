@@ -77,7 +77,7 @@ RESEND_API_KEY=<Resend API key>
 FROM_EMAIL=<verified sender address>
 ```
 
-The Google redirect URLs must exactly match the Authorized redirect URIs in Google Cloud. Keep local and production values separate. Google sign-in and Google Calendar authorization are separate OAuth flows. Google Calendar is currently deferred/broken and must not be repaired as part of unrelated work.
+The Google redirect URLs must exactly match the Authorized redirect URIs in Google Cloud. Keep local and production values separate. Google sign-in and Google Calendar authorization are separate OAuth flows. Google Calendar now requests free/busy and read-only calendar-list scopes so users can select calendars; the new scope and live flow still need production consent and verification.
 
 ## Authentication state
 
@@ -127,23 +127,11 @@ Tokens are cryptographically random, only token hashes are stored, verification 
 
 ## Important deferred issue
 
-Google Calendar FreeBusy synchronization is currently deferred. A local sync request has returned Google HTTP 400 `timeRangeTooLong`; the code was changed to request 364 days, but this has not been fully verified in the user's running localhost copy. Do not spend the next task repairing Google Calendar unless explicitly requested. iCal remains the active calendar integration.
+Google Calendar FreeBusy synchronization is implemented with short date chunks and selected calendar IDs. Its OAuth selection flow and selected secondary calendars still need a real Google account check after deployment; mocked tests do not prove production consent or permissions.
 
 ## Test status at handoff
 
-The focused authentication tests pass:
-
-```text
-22 passed
-```
-
-The full suite last reported:
-
-```text
-154 passed, 1 failed
-```
-
-The remaining failure is `tests/test_routes.py::test_sync_now_replaces_stale_shifted_ical_cache`. It is an outdated iCal test that expects the old incorrect timezone-shifted result and uses an ownerless test connection. Do not reintroduce the old timezone behavior merely to satisfy that test; update the test only when explicitly handling the deferred iCal work.
+The full suite last reported `204 passed, 78 mongomock deprecation warnings`. The new Google calendar-list scope and real secondary-calendar selection have not yet been verified against Google's production consent flow.
 
 ## Working rules for the next agent
 
