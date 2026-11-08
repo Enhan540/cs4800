@@ -417,21 +417,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     return result;
   };
-  const normalizedTime = (value) => {
-    const minutes = parseTime(value);
-    return minutes === null ? "" : `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-  };
-
   const dialog = document.querySelector("[data-time-picker-dialog]");
   const dialogHour = dialog?.querySelector("[data-picker-hour]");
   const dialogMinute = dialog?.querySelector("[data-picker-minute]");
   const dialogPeriod = dialog?.querySelector("[data-picker-period]");
   let activeTimeInput = null;
   let originalTimeValue = "";
-  const pickerParent = dialog?.parentNode;
-  const pickerNextSibling = dialog?.nextSibling;
-  let embeddedPickerOwner = null;
-  let pickerLayoutOwner = null;
   const setDialogTime = (minutes) => {
     dialogHour.value = String(Math.floor((minutes % 720) / 60) || 12);
     const minute = String(minutes % 60).padStart(2, "0");
@@ -452,38 +443,12 @@ document.addEventListener("DOMContentLoaded", () => {
     setDialogTime(parseTime(input.value) ?? 540);
     const bounds = input.getBoundingClientRect();
     dialog.hidden = false;
-    const availabilityOwner = input.closest(
-      "[data-availability-window-dialog], [data-day-availability-dialog]",
-    );
-    if (availabilityOwner) {
-      const activeDayCard = input.closest(".day-window-card-active");
-      const pickerOwner = activeDayCard || availabilityOwner;
-      pickerOwner.appendChild(dialog);
-      embeddedPickerOwner = pickerOwner;
-      if (activeDayCard) {
-        activeDayCard.classList.add("time-picker-open");
-        pickerLayoutOwner = activeDayCard;
-      }
-      dialog.style.position = "absolute";
-      dialog.style.width = `${Math.max(280, bounds.width)}px`;
-      const ownerBounds = pickerOwner.getBoundingClientRect();
-      const left = Math.max(0, Math.min(
-        bounds.left - ownerBounds.left,
-        pickerOwner.clientWidth - dialog.offsetWidth,
-      ));
-      dialog.style.left = `${left}px`;
-      dialog.style.top = `${bounds.bottom - ownerBounds.top + 8}px`;
-    }
-    if (!availabilityOwner) {
-      dialog.style.width = `${Math.max(280, bounds.width)}px`;
-      dialog.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - dialog.offsetWidth - 8))}px`;
-      const spaceBelow = window.innerHeight - bounds.bottom;
-      if (spaceBelow >= dialog.offsetHeight + 12) {
-        dialog.style.top = `${bounds.bottom + 6}px`;
-      } else {
-        dialog.style.top = `${Math.max(8, bounds.top - dialog.offsetHeight - 6)}px`;
-      }
-    }
+    dialog.style.width = `${Math.max(280, bounds.width)}px`;
+    dialog.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - dialog.offsetWidth - 8))}px`;
+    const spaceBelow = window.innerHeight - bounds.bottom;
+    dialog.style.top = spaceBelow >= dialog.offsetHeight + 12
+      ? `${bounds.bottom + 6}px`
+      : `${Math.max(8, bounds.top - dialog.offsetHeight - 6)}px`;
   };
   const closePicker = (accept, restoreOriginal = true) => {
     if (!activeTimeInput || !dialog) return;
@@ -495,17 +460,6 @@ document.addEventListener("DOMContentLoaded", () => {
       activeTimeInput.value = originalTimeValue;
     }
     dialog.hidden = true;
-    pickerLayoutOwner?.classList.remove("time-picker-open");
-    pickerLayoutOwner = null;
-    if (embeddedPickerOwner && pickerParent) {
-      if (pickerNextSibling && pickerNextSibling.parentNode === pickerParent) pickerParent.insertBefore(dialog, pickerNextSibling);
-      else pickerParent.appendChild(dialog);
-      embeddedPickerOwner = null;
-      dialog.style.position = "";
-      dialog.style.width = "";
-      dialog.style.left = "";
-      dialog.style.top = "";
-    }
     activeTimeInput = null;
     originalTimeValue = "";
   };
@@ -548,11 +502,14 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     input.addEventListener("keydown", (event) => {
       input.dataset.deleting = event.key === "Backspace" || event.key === "Delete" ? "true" : "false";
-      if (event.key === "Enter") {
+      if (event.key === "Enter" && activeTimeInput === input) {
+        event.preventDefault();
         const minutes = parseTime(input.value);
         if (minutes !== null) { setDialogTime(minutes); closePicker(true); }
       }
-      if (event.key === "Escape") closePicker(false);
+      if (event.key === "Escape" && activeTimeInput === input) {
+        event.preventDefault(); event.stopPropagation(); closePicker(false);
+      }
       if (event.key === "ArrowDown" && event.altKey) {
         event.preventDefault();
         openPicker(input);
@@ -571,7 +528,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("pointerdown", (event) => {
     if (activeTimeInput && !dialog.contains(event.target) && event.target !== activeTimeInput) closePicker(true);
   });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closePicker(false); });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && activeTimeInput) {
+      event.preventDefault(); closePicker(false);
+    }
+  });
 
   document.querySelectorAll("[data-rsvp-form]").forEach((form) => {
     const status = form.querySelector("[data-rsvp-status]");
@@ -604,9 +565,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   const availabilityMinutes = (value) => {
-    if (!value) return null;
-    const parts = value.split(":").map(Number);
-    return parts.length === 2 && parts.every(Number.isFinite) ? parts[0] * 60 + parts[1] : null;
+    const canonical = /^(\d{1,2}):(\d{2})$/.exec(String(value || ""));
+    if (!canonical) return parseTime(value);
+    const hour = Number(canonical[1]), minute = Number(canonical[2]);
+    return hour <= 23 && minute <= 59 ? hour * 60 + minute : null;
   };
   const restorePageScroll = (left, top) => {
     const root = document.documentElement;
@@ -711,204 +673,36 @@ document.addEventListener("DOMContentLoaded", () => {
       track.appendChild(block);
     });
   };
-  const refreshAvailabilitySummary = (day) => {
-    refreshCombinedAvailability(day);
-    const summary = document.querySelector(`[data-summary-day="${day}"] [data-summary-windows]`);
-    if (!summary) return;
-    summary.replaceChildren();
-    availabilityBlocksForDay(day).forEach((block) => {
-      const item = document.createElement("p");
-      item.dataset.summaryEntryId = block.dataset.entryId;
-      item.textContent = `${availabilityTimeText(block.dataset.startTime)} – ${availabilityTimeText(block.dataset.endTime)}`;
-      summary.appendChild(item);
-    });
-    if (!summary.children.length) {
-      const empty = document.createElement("p");
-      empty.className = "muted";
-      empty.dataset.summaryEmpty = "true";
-      empty.textContent = "No availability";
-      summary.appendChild(empty);
-    }
-  };
   const updateAvailabilityBlock = (entry) => {
-    document.querySelectorAll(`[data-entry-id="${entry.id}"]`).forEach((block) => {
-      block.dataset.day = entry.day;
-      block.dataset.startTime = availabilityTimeText(entry.start_time);
-      block.dataset.endTime = availabilityTimeText(entry.end_time);
-      const start = availabilityMinutes(entry.start_time);
-      const end = availabilityMinutes(entry.end_time);
-      if (start !== null && end !== null) {
-        block.style.top = `${(start / 1440) * 100}%`;
-        block.style.height = `${((end - start) / 1440) * 100}%`;
-      }
-      const label = block.querySelector(".availability-window-label");
-      if (label) label.textContent = `${availabilityTimeText(entry.start_time)} – ${availabilityTimeText(entry.end_time)}`;
-      block.title = `${availabilityTimeText(entry.start_time)} - ${availabilityTimeText(entry.end_time)}`;
-      if (block.matches("[data-availability-window]")) {
-        block.setAttribute("aria-label", `${entry.day} availability, ${availabilityTimeText(entry.start_time)} to ${availabilityTimeText(entry.end_time)}. Edit availability.`);
-      }
-    });
-    refreshAvailabilitySummary(entry.day);
-  };
-  const removeAvailabilityBlock = (id, day) => {
-    document.querySelectorAll(`[data-entry-id="${id}"]`).forEach((block) => block.remove());
-    refreshAvailabilitySummary(day);
-  };
-  const makeAvailabilityBlock = (entry) => {
-    const track = document.querySelector(`[data-availability-calendar-day="${entry.day}"] .calendar-day-track`);
-    if (!track) return;
-    const block = document.createElement("button");
-    block.type = "button";
-    block.className = "calendar-window availability-window-block";
-    block.dataset.availabilityWindow = "true";
-    block.dataset.entryId = entry.id;
+    const track = availabilityColumnForDay(entry.day)?.querySelector(".calendar-day-track");
+    if (!track) return null;
+    let block = track.querySelector(`[data-entry-id="${entry.id}"]`);
+    if (!block) {
+      block = document.createElement("button");
+      block.type = "button";
+      block.className = "calendar-window availability-window-block";
+      block.dataset.availabilityWindow = "true";
+      block.dataset.entryId = entry.id;
+      block.setAttribute("aria-haspopup", "dialog");
+      const label = document.createElement("span");
+      label.className = "availability-window-label";
+      block.appendChild(label);
+      track.appendChild(block);
+    }
     block.dataset.day = entry.day;
-    block.dataset.startTime = availabilityTimeText(entry.start_time);
-    block.dataset.endTime = availabilityTimeText(entry.end_time);
-    block.title = `${availabilityTimeText(entry.start_time)} - ${availabilityTimeText(entry.end_time)}`;
-    block.setAttribute("aria-label", `${entry.day} availability, ${block.dataset.startTime} to ${block.dataset.endTime}. Edit availability.`);
-    block.style.top = `${(availabilityMinutes(entry.start_time) / 1440) * 100}%`;
-    block.style.height = `${((availabilityMinutes(entry.end_time) - availabilityMinutes(entry.start_time)) / 1440) * 100}%`;
-    const label = document.createElement("span");
-    label.className = "availability-window-label";
-    label.textContent = `${block.dataset.startTime} – ${block.dataset.endTime}`;
-    block.appendChild(label);
-    track.appendChild(block);
+    block.dataset.startTime = entry.start_time;
+    block.dataset.endTime = entry.end_time;
+    const start = availabilityMinutes(entry.start_time), end = availabilityMinutes(entry.end_time);
+    block.style.top = `${start / 1440 * 100}%`;
+    block.style.height = `${(end - start) / 1440 * 100}%`;
+    const label = `${availabilityTimeText(entry.start_time)} – ${availabilityTimeText(entry.end_time)}`;
+    block.querySelector(".availability-window-label").textContent = label;
+    block.title = label;
+    block.setAttribute("aria-label", `${track.parentElement.dataset.date}, ${label}. View weekly availability.`);
+    refreshCombinedAvailability(entry.day);
     return block;
   };
 
-  document.querySelectorAll("[data-availability-editor]").forEach((editor) => {
-    const tabs = editor.querySelectorAll("[data-availability-day]");
-    const panels = editor.querySelectorAll("[data-availability-panel]");
-    let draftTimes = null;
-    const activateDay = (day) => {
-      const visiblePanel = Array.from(panels).find((panel) => !panel.classList.contains("is-hidden"));
-      if (visiblePanel) {
-        draftTimes = {
-          start: visiblePanel.querySelector('[name="start_time"]').value,
-          end: visiblePanel.querySelector('[name="end_time"]').value,
-        };
-      }
-      tabs.forEach((tab) => {
-        const active = tab.dataset.availabilityDay === day;
-        tab.classList.toggle("is-active", active);
-        tab.setAttribute("aria-selected", String(active));
-      });
-      panels.forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.availabilityPanel !== day));
-      const selectedPanel = Array.from(panels).find((panel) => panel.dataset.availabilityPanel === day);
-      if (draftTimes && selectedPanel) {
-        selectedPanel.querySelector('[name="start_time"]').value = draftTimes.start;
-        selectedPanel.querySelector('[name="end_time"]').value = draftTimes.end;
-      }
-    };
-    tabs.forEach((tab) => tab.addEventListener("click", () => activateDay(tab.dataset.availabilityDay)));
-    editor.querySelectorAll("[data-availability-add-form]").forEach((form) => {
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const start = form.elements.start_time;
-        const end = form.elements.end_time;
-        const startMinutes = parseTime(start.value);
-        const endMinutes = parseTime(end.value);
-        if (startMinutes === null || endMinutes === null) {
-          (startMinutes === null ? start : end).setCustomValidity("Please enter a valid time.");
-          (startMinutes === null ? start : end).reportValidity();
-          return;
-        }
-        start.value = formatTime(startMinutes);
-        end.value = formatTime(endMinutes);
-        if (endMinutes <= startMinutes) {
-          end.setCustomValidity("End time must be later than start time.");
-          end.reportValidity();
-          end.setCustomValidity("");
-          return;
-        }
-        start.value = formatTime(startMinutes);
-        end.value = formatTime(endMinutes);
-        const message = form.querySelector("[data-availability-form-message]");
-        const button = form.querySelector("button[type=submit]");
-        button.disabled = true;
-        try {
-          const response = await fetch(form.action, {
-            method: "POST",
-            body: new FormData(form),
-            headers: {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-          });
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.error || "Availability could not be added.");
-          makeAvailabilityBlock(payload.entry);
-          refreshAvailabilitySummary(payload.entry.day);
-          if (message) { message.textContent = "Availability window added."; message.classList.add("success-text"); }
-        } catch (error) {
-          if (message) { message.textContent = error.message; message.classList.remove("success-text"); }
-        } finally {
-          button.disabled = false;
-        }
-      });
-    });
-    const current = document.querySelector("[data-current-availability]");
-    if (!current) return;
-    const readOnly = current.querySelector("[data-availability-readonly]");
-    const bulkForm = current.querySelector("[data-availability-bulk]");
-    const edit = current.querySelector("[data-availability-edit]");
-    const cancel = current.querySelector("[data-availability-cancel]");
-    const save = current.querySelector("[data-availability-save]");
-    const editMode = (enabled) => {
-      readOnly.hidden = enabled; bulkForm.hidden = !enabled;
-      edit.hidden = enabled; cancel.hidden = !enabled; save.hidden = !enabled;
-    };
-    edit.addEventListener("click", () => editMode(true));
-    let dirty = false;
-    const markDirty = () => { dirty = true; };
-    bulkForm.addEventListener("input", markDirty);
-    bulkForm.addEventListener("change", markDirty);
-    cancel.addEventListener("click", async () => {
-      if (dirty && !await askUnsaved("You have unsaved availability changes. Discard them?")) return;
-      window.location.reload();
-    });
-    current.querySelectorAll("[data-remove-availability]").forEach((button) => button.addEventListener("click", () => {
-      const row = button.closest("[data-availability-entry]"); row.dataset.deleted = "true"; row.hidden = true; dirty = true;
-    }));
-    save.addEventListener("click", () => {
-      const changes = Array.from(bulkForm.querySelectorAll("[data-availability-entry]")).map((row) => ({
-        id: row.dataset.entryId,
-        deleted: row.dataset.deleted === "true",
-        start_time: normalizedTime(row.querySelector('[name="start_time"]').value),
-        end_time: normalizedTime(row.querySelector('[name="end_time"]').value),
-      }));
-      if (changes.some((change) => !change.deleted && (!change.start_time || !change.end_time))) {
-        const message = current.querySelector("[data-availability-form-message]");
-        if (message) message.textContent = "Please enter valid times before saving.";
-        return;
-      }
-      bulkForm.querySelector("[data-availability-payload]").value = JSON.stringify(changes);
-      dirty = false;
-      bulkForm.requestSubmit();
-    });
-  });
-
-  const windowDialog = document.querySelector("[data-availability-window-dialog]");
-  const windowForm = windowDialog?.querySelector("[data-availability-window-form]");
-  const windowStart = windowForm?.querySelector("[data-window-start]");
-  const windowEnd = windowForm?.querySelector("[data-window-end]");
-  const closeWindowDialog = () => {
-    if (!windowDialog) return;
-    closePicker(false);
-    closeStableDialog(windowDialog);
-  };
-  const openWindowDialog = (block) => {
-    if (!windowDialog || !windowForm) return;
-    closeWindowDialog();
-    windowForm.action = windowDialog.dataset.editUrlTemplate.replace("ENTRY_ID", block.dataset.entryId);
-    windowForm.querySelector("[data-window-day]").value = block.dataset.day;
-    windowStart.value = block.dataset.startTime;
-    windowEnd.value = block.dataset.endTime;
-    windowStart.setCustomValidity("");
-    windowEnd.setCustomValidity("");
-    windowDialog.dataset.entryId = block.dataset.entryId;
-    windowDialog.dataset.entryDay = block.dataset.day;
-    windowDialog.querySelector("#availability-window-title").textContent = `Edit Availability · ${block.dataset.day}`;
-    showStableDialog(windowDialog);
-  };
   const weeklyCalendar = document.querySelector(".weekly-calendar");
   document.querySelectorAll("[data-calendar-filter]").forEach((button) => button.addEventListener("click", () => {
     const selected = button.getAttribute("aria-pressed") === "true" ? null : button.dataset.calendarFilter;
@@ -918,381 +712,257 @@ document.addEventListener("DOMContentLoaded", () => {
       mask.hidden = Boolean(selected && mask.dataset.calendarSource !== selected);
     });
   }));
-  const maskedAvailabilityBlock = (column, clientY) => {
-    const track = column.querySelector(".calendar-day-track");
-    const minute = (clientY - track.getBoundingClientRect().top) / track.getBoundingClientRect().height * 1440;
-    return availabilityBlocksForDay(column.dataset.day).find((block) =>
-      availabilityMinutes(block.dataset.startTime) <= minute && minute < availabilityMinutes(block.dataset.endTime));
+  // One pixel per minute keeps small windows selectable, with 8 AM visible initially.
+  if (weeklyCalendar) weeklyCalendar.scrollTop = 480;
+  const availabilityPopover = document.querySelector("[data-availability-popover]");
+  const availabilityForm = availabilityPopover?.querySelector("[data-availability-window-form]");
+  const availabilityPreview = availabilityPopover?.querySelector("[data-availability-preview]");
+  const availabilityError = availabilityPopover?.querySelector("[data-availability-error]");
+  const availabilityStatus = document.querySelector("[data-availability-status]");
+  const deleteDialog = document.querySelector("[data-availability-delete-dialog]");
+  const deleteError = deleteDialog?.querySelector("[data-availability-delete-error]");
+  let availabilitySelection = null;
+  let availabilitySaving = false;
+  const dateLabel = (column) => {
+    // Construct in local civil time; parsing YYYY-MM-DD as UTC shifts the displayed day.
+    const [year, month, day] = column.dataset.date.split("-").map(Number);
+    return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+      weekday: "long", month: "long", day: "numeric", year: "numeric",
+    });
   };
+  const clearAvailabilityError = () => { availabilityError.hidden = true; availabilityError.textContent = ""; };
+  const closeAvailabilityPopover = (restoreFocus = true) => {
+    if (availabilitySaving || !availabilityPopover?.open) return;
+    if (activeTimeInput && availabilityPopover.contains(activeTimeInput)) closePicker(false);
+    const target = availabilitySelection?.focusTarget;
+    availabilitySelection?.block?.classList.remove("is-selected");
+    availabilitySelection?.draft?.remove();
+    availabilityPopover.close();
+    availabilitySelection = null;
+    if (restoreFocus && target?.isConnected) target.focus({preventScroll: true});
+  };
+  const positionAvailabilityPopover = () => {
+    if (!availabilityPopover?.open || !availabilitySelection) return;
+    const {column, anchorMinute} = availabilitySelection;
+    const track = column.querySelector(".calendar-day-track").getBoundingClientRect();
+    const width = availabilityPopover.offsetWidth, height = availabilityPopover.offsetHeight;
+    const mobile = window.innerWidth <= 600;
+    let left = track.right + 12;
+    if (left + width > window.innerWidth - 12) left = track.left - width - 12;
+    left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+    const top = track.top + anchorMinute / 1440 * track.height;
+    availabilityPopover.style.left = `${mobile ? (window.innerWidth - width) / 2 : left}px`;
+    availabilityPopover.style.top = `${mobile
+      ? Math.max(12, window.innerHeight - height - 12)
+      : Math.max(12, Math.min(top, window.innerHeight - height - 12))}px`;
+  };
+  const renderAvailabilitySelection = () => {
+    if (!availabilitySelection) return;
+    const {column, block, mode} = availabilitySelection;
+    availabilityPopover.querySelector("[data-availability-date]").textContent = dateLabel(column);
+    availabilityPreview.hidden = mode !== "view";
+    availabilityForm.hidden = mode === "view";
+    availabilityForm.action = block
+      ? availabilityPopover.dataset.editUrlTemplate.replace("ENTRY_ID", block.dataset.entryId)
+      : availabilityPopover.dataset.createUrl;
+    availabilityForm.elements.day.value = column.dataset.day;
+    availabilityPopover.querySelector("[data-availability-time]").textContent = block
+      ? `${availabilityTimeText(block.dataset.startTime)} – ${availabilityTimeText(block.dataset.endTime)}` : "";
+    clearAvailabilityError();
+    positionAvailabilityPopover();
+  };
+  const openAvailabilityPopover = (column, minute, block = null, focusTarget = null) => {
+    if (!availabilityPopover || availabilitySaving) return;
+    closeAvailabilityPopover(false);
+    const start = block ? availabilityMinutes(block.dataset.startTime)
+      : Math.max(0, Math.min(1435, Math.round(minute / 5) * 5));
+    const end = block ? availabilityMinutes(block.dataset.endTime) : Math.min(start + 60, 1439);
+    availabilitySelection = {
+      column, block, anchorMinute: minute, mode: block ? "view" : "create",
+      focusTarget: focusTarget || block || column.querySelector(".calendar-day-track"),
+    };
+    ["start_time", "end_time"].forEach((name, index) => {
+      const input = availabilityForm.elements[name];
+      input.value = formatTime(index ? end : start);
+      input.dataset.lastAccepted = input.value;
+      input.setCustomValidity("");
+      input.classList.remove("time-input-invalid");
+    });
+    block?.classList.add("is-selected");
+    if (!block) {
+      const draft = document.createElement("span");
+      draft.className = "calendar-draft-window";
+      draft.style.top = `${start / 1440 * 100}%`;
+      draft.style.height = `${(end - start) / 1440 * 100}%`;
+      draft.setAttribute("aria-hidden", "true");
+      column.querySelector(".calendar-day-track").appendChild(draft);
+      availabilitySelection.draft = draft;
+    }
+    renderAvailabilitySelection();
+    availabilityPopover.show();
+    positionAvailabilityPopover();
+    availabilityPopover.querySelector("[data-availability-close]").focus({preventScroll: true});
+  };
+  const recurringBlockAt = (column, minute) => availabilityBlocksForDay(column.dataset.day).find((block) => {
+    const start = availabilityMinutes(block.dataset.startTime), end = availabilityMinutes(block.dataset.endTime);
+    return start !== null && end !== null && start <= minute && minute < end;
+  });
   weeklyCalendar?.addEventListener("click", (event) => {
+    if (weeklyCalendar.dataset.availabilityEditable !== "true") return;
+    const track = event.target.closest(".calendar-day-track");
+    if (!track) return;
+    const column = track.parentElement, bounds = track.getBoundingClientRect();
     const block = event.target.closest("[data-availability-window]");
-    if (block) {
-      event.stopPropagation();
-      openWindowDialog(block);
-      return;
-    }
-    const column = event.target.closest("[data-availability-calendar-day]");
-    const mask = event.target.closest("[data-calendar-mask]");
-    if (mask && column) {
-      const underlying = maskedAvailabilityBlock(column, event.clientY);
-      if (underlying?.matches("[data-availability-window]")) { openWindowDialog(underlying); return; }
-    }
-    if (column) openDayDialog(column);
+    const minute = event.detail === 0 && block
+      ? availabilityMinutes(block.dataset.startTime)
+      : Math.max(0, Math.min(1439, (event.clientY - bounds.top) / bounds.height * 1440));
+    // Masks have their own labels but never take ownership of the recurring window beneath.
+    openAvailabilityPopover(column, minute, block || recurringBlockAt(column, minute));
   });
-  weeklyCalendar?.addEventListener("keydown", (event) => {
-    const column = event.target.closest("[data-availability-calendar-day]");
-    if (!column || event.target.closest("[data-availability-window]")) return;
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      openDayDialog(column);
-    }
+  weeklyCalendar?.querySelectorAll('.calendar-day-track[tabindex="0"]').forEach((track) => {
+    let cursorMinute = 540;
+    const cursor = document.createElement("span");
+    cursor.className = "calendar-slot-cursor";
+    cursor.setAttribute("aria-hidden", "true");
+    track.appendChild(cursor);
+    const moveCursor = () => {
+      cursor.style.top = `${cursorMinute / 1440 * 100}%`;
+      track.setAttribute("aria-label", `${dateLabel(track.parentElement)}, ${formatTime(cursorMinute)}. Enter to add weekly availability.`);
+      const bounds = track.getBoundingClientRect(), viewport = weeklyCalendar.getBoundingClientRect();
+      const y = bounds.top + cursorMinute / 1440 * bounds.height;
+      if (y < viewport.top + 65) weeklyCalendar.scrollTop -= viewport.top + 65 - y;
+      else if (y > viewport.bottom - 30) weeklyCalendar.scrollTop += y - viewport.bottom + 30;
+    };
+    track.addEventListener("pointerdown", (event) => {
+      const bounds = track.getBoundingClientRect();
+      cursorMinute = Math.max(0, Math.min(1435,
+        Math.round((event.clientY - bounds.top) / bounds.height * 1440 / 5) * 5));
+    });
+    track.addEventListener("focus", moveCursor);
+    track.addEventListener("keydown", (event) => {
+      if (event.target !== track) return;
+      const changes = {ArrowDown: 5, ArrowUp: -5, PageDown: 60, PageUp: -60};
+      if (event.key in changes || event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        cursorMinute = event.key === "Home" ? 0 : event.key === "End" ? 1435
+          : Math.max(0, Math.min(1435, cursorMinute + changes[event.key]));
+        moveCursor();
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openAvailabilityPopover(track.parentElement, cursorMinute, recurringBlockAt(track.parentElement, cursorMinute), track);
+      }
+    });
   });
-  windowDialog?.querySelector("[data-window-dialog-close]")?.addEventListener("click", closeWindowDialog);
-  windowDialog?.querySelector("[data-window-dialog-cancel]")?.addEventListener("click", closeWindowDialog);
-  windowDialog?.querySelector("[data-window-dialog-delete]")?.addEventListener("click", () => {
-    const id = windowDialog.dataset.entryId;
-    if (!id) return;
-    openAvailabilityDeleteConfirmation(id, windowDialog.dataset.entryDay, "specific");
+  availabilityPopover?.querySelector("[data-availability-close]").addEventListener("click", () => closeAvailabilityPopover());
+  availabilityPopover?.querySelector("[data-availability-edit]").addEventListener("click", () => {
+    const block = availabilitySelection.block;
+    availabilityForm.elements.start_time.value = availabilityTimeText(block.dataset.startTime);
+    availabilityForm.elements.end_time.value = availabilityTimeText(block.dataset.endTime);
+    availabilityForm.querySelectorAll("[data-unified-time]").forEach((input) => {
+      input.setCustomValidity("");
+      input.classList.remove("time-input-invalid");
+      input.dataset.lastAccepted = input.value;
+    });
+    availabilitySelection.mode = "edit";
+    renderAvailabilitySelection();
+    availabilityForm.elements.start_time.focus({preventScroll: true});
   });
-  dialog?.addEventListener("click", (event) => event.stopPropagation());
-  dialog?.addEventListener("pointerdown", (event) => event.stopPropagation());
-  windowDialog?.addEventListener("pointerdown", (event) => {
-    if (activeTimeInput && embeddedPickerOwner === windowDialog
-      && !dialog.contains(event.target) && event.target !== activeTimeInput) closePicker(true);
-    if (event.target === windowDialog) { closeWindowDialog(); return; }
-    event.stopPropagation();
+  availabilityPopover?.querySelector("[data-availability-cancel]").addEventListener("click", () => {
+    if (availabilitySaving) return;
+    if (availabilitySelection.block) {
+      closePicker(false);
+      availabilitySelection.mode = "view";
+      renderAvailabilitySelection();
+      availabilityPopover.querySelector("[data-availability-edit]").focus({preventScroll: true});
+    } else closeAvailabilityPopover();
   });
-  windowDialog?.addEventListener("click", (event) => {
-    if (event.target === windowDialog) closeWindowDialog(); else event.stopPropagation();
+  availabilityPopover?.addEventListener("cancel", (event) => { event.preventDefault(); closeAvailabilityPopover(); });
+  document.addEventListener("pointerdown", (event) => {
+    if (availabilityPopover?.open && !availabilityPopover.contains(event.target)
+      && !dialog?.contains(event.target) && !deleteDialog?.open) closeAvailabilityPopover(false);
   });
-  windowDialog?.addEventListener("cancel", (event) => event.preventDefault());
-  windowForm?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const startMinutes = parseTime(windowStart.value);
-    const endMinutes = parseTime(windowEnd.value);
-    if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) {
-      const invalid = startMinutes === null ? windowStart : windowEnd;
-      invalid.setCustomValidity(endMinutes <= startMinutes ? "End time must be later than start time." : "Please enter a valid time.");
-      invalid.reportValidity(); invalid.setCustomValidity(""); return;
-    }
-    windowStart.value = formatTime(startMinutes); windowEnd.value = formatTime(endMinutes);
-    const response = await fetch(windowForm.action, {
-      method: "POST", body: new FormData(windowForm),
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !event.defaultPrevented && !deleteDialog?.open) closeAvailabilityPopover();
+  });
+  window.addEventListener("resize", positionAvailabilityPopover);
+  window.addEventListener("scroll", positionAvailabilityPopover, true);
+  const setAvailabilitySaving = (saving) => {
+    availabilitySaving = saving;
+    availabilityPopover.querySelectorAll("button, input").forEach((control) => { control.disabled = saving; });
+    deleteDialog.querySelectorAll("button").forEach((button) => { button.disabled = saving; });
+    availabilityPopover.setAttribute("aria-busy", String(saving));
+  };
+  const availabilityRequest = async (url, body) => {
+    const response = await fetch(url, {
+      method: "POST", body,
       headers: {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
     });
-    if (!response.ok) return;
-    const payload = await response.json();
-    updateAvailabilityBlock(payload.entry);
-    closeWindowDialog();
-  });
-
-  const dayDialog = document.querySelector("[data-day-availability-dialog]");
-  const dayReadonly = dayDialog?.querySelector("[data-day-readonly]");
-  const dayCancelButton = dayDialog?.querySelector("[data-day-dialog-cancel]");
-  const daySaveButton = dayDialog?.querySelector("[data-day-dialog-save]");
-  const dayDeleteDialog = document.querySelector("[data-day-delete-dialog]");
-  const dayDeleteMessage = dayDeleteDialog?.querySelector("[data-day-delete-message]");
-  const dayDeleteConfirm = dayDeleteDialog?.querySelector("[data-day-delete-confirm]");
-  const dayDeleteCancelButtons = dayDeleteDialog?.querySelectorAll("[data-day-delete-cancel]");
-  const canEditDay = dayDialog?.dataset.editable === "true";
-  let activeDay = null;
-  let activeDayColumn = null;
-  let persistedWindows = new Map();
-  let stagedWindows = new Map();
-  let activeWindowId = null;
-  let pendingDeleteId = null;
-  let pendingDeleteMode = null;
-  let pendingDeleteDay = null;
-  const openAvailabilityDeleteConfirmation = (id, day, mode = "day") => {
-    const entry = mode === "day" ? stagedWindows.get(id) : null;
-    pendingDeleteId = id;
-    pendingDeleteMode = mode;
-    pendingDeleteDay = day;
-    const start = entry?.start_time || windowStart?.value || "";
-    const end = entry?.end_time || windowEnd?.value || "";
-    if (dayDeleteMessage) {
-      dayDeleteMessage.textContent = `${stagedTimeText(start)} – ${stagedTimeText(end)}\n\nAre you sure you want to remove this availability window?`;
-    }
-    showStableDialog(dayDeleteDialog);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "The window could not be saved. Please try again.");
+    return payload;
   };
-  const dayEntries = () => Array.from(activeDayColumn?.querySelectorAll(
-    "[data-availability-window], [data-availability-window-readonly]",
-  ) || []).map((block) => ({
-    id: block.dataset.entryId,
-    day: activeDay,
-    start_time: normalizedTime(block.dataset.startTime),
-    end_time: normalizedTime(block.dataset.endTime),
-  }));
-  const stagedTimeText = (value) => {
-    const canonicalMinutes = availabilityMinutes(value);
-    if (canonicalMinutes !== null) return formatTime(canonicalMinutes);
-    const normalized = normalizedTime(value);
-    return normalized ? availabilityTimeText(normalized) : value;
-  };
-  const resetDayStaging = () => {
-    persistedWindows = new Map(dayEntries().map((entry) => [entry.id, {...entry}]));
-    stagedWindows = new Map(Array.from(persistedWindows, ([id, entry]) => [id, {...entry}]));
-    activeWindowId = null;
-  };
-  const windowIsDirty = (id) => {
-    const persisted = persistedWindows.get(id);
-    const staged = stagedWindows.get(id);
-    if (!persisted || !staged) return false;
-    return (normalizedTime(staged.start_time) || staged.start_time.trim()) !== persisted.start_time
-      || (normalizedTime(staged.end_time) || staged.end_time.trim()) !== persisted.end_time;
-  };
-  const hasStagedChanges = () => (
-    Array.from(persistedWindows.keys()).some((id) => !stagedWindows.has(id))
-    || Array.from(stagedWindows.keys()).some(windowIsDirty)
-  );
-  const updateDayActions = () => {
-    const dirty = hasStagedChanges();
-    dayCancelButton.hidden = !dirty;
-    daySaveButton.hidden = !dirty;
-  };
-  const makeDayWindowCard = (entry, {editable = false, dirty = false} = {}) => {
-    const card = document.createElement(editable ? "button" : "article");
-    card.className = "day-window-card";
-    if (editable) {
-      card.type = "button";
-      card.dataset.dayWindowSelect = entry.id;
-      card.setAttribute("aria-label", `Edit ${stagedTimeText(entry.start_time)} to ${stagedTimeText(entry.end_time)}`);
-    }
-    const line = document.createElement("span");
-    line.className = "day-window-time";
-    line.textContent = `${stagedTimeText(entry.start_time)} – ${stagedTimeText(entry.end_time)}`;
-    card.appendChild(line);
-    if (editable) {
-      const icon = document.createElement("span");
-      icon.className = "day-window-edit-icon";
-      icon.setAttribute("aria-hidden", "true");
-      icon.textContent = "✎";
-      card.appendChild(icon);
-    }
-    if (dirty) {
-      const status = document.createElement("em");
-      status.className = "day-window-unsaved";
-      status.textContent = "Unsaved changes";
-      card.appendChild(status);
-    }
-    if (editable) {
-      const remove = document.createElement("span");
-      remove.className = "day-window-delete";
-      remove.dataset.dayWindowDelete = entry.id;
-      remove.setAttribute("role", "button");
-      remove.setAttribute("tabindex", "0");
-      remove.setAttribute("aria-label", `Delete ${stagedTimeText(entry.start_time)} to ${stagedTimeText(entry.end_time)}`);
-      remove.textContent = "×";
-      card.appendChild(remove);
-    }
-    return card;
-  };
-  const renderDayWindows = () => {
-    dayReadonly.replaceChildren();
-    const entries = Array.from(stagedWindows.values());
-    if (!entries.length) { const empty = document.createElement("p"); empty.className = "muted"; empty.textContent = `No availability windows for ${activeDay}.`; dayReadonly.appendChild(empty); }
-    entries.forEach((entry) => {
-      if (entry.id === activeWindowId) {
-        const card = document.createElement("article");
-        card.className = "day-window-card day-window-card-active";
-        card.dataset.activeDayWindow = entry.id;
-        const fields = document.createElement("div");
-        fields.className = "day-window-fields";
-        fields.append(makeDayTimeInput("start_time", "Start Time", entry.start_time, entry.id), makeDayTimeInput("end_time", "End Time", entry.end_time, entry.id));
-        card.appendChild(fields);
-        const remove = document.createElement("span");
-        remove.className = "day-window-delete";
-        remove.dataset.dayWindowDelete = entry.id;
-        remove.setAttribute("role", "button");
-        remove.setAttribute("tabindex", "0");
-        remove.setAttribute("aria-label", `Delete ${stagedTimeText(entry.start_time)} to ${stagedTimeText(entry.end_time)}`);
-        remove.textContent = "×";
-        card.appendChild(remove);
-        dayReadonly.appendChild(card);
-      } else {
-        dayReadonly.appendChild(makeDayWindowCard(entry, {editable: canEditDay, dirty: windowIsDirty(entry.id)}));
-      }
-    });
-    updateDayActions();
-  };
-  const makeDayTimeInput = (name, label, value, entryId) => {
-    const field = document.createElement("label");
-    field.className = "unified-time-input";
-    const caption = document.createElement("span");
-    caption.textContent = label;
-    const control = document.createElement("span");
-    control.className = "unified-time-control";
-    const input = document.createElement("input");
-    input.name = name;
-    input.type = "text";
-    input.value = stagedTimeText(value);
-    input.inputMode = "text";
-    input.autocomplete = "off";
-    input.dataset.unifiedTime = "true";
-    control.appendChild(input);
-    field.append(caption, control);
-    bindUnifiedTimeInput(input);
-    input.addEventListener("input", () => {
-      const staged = stagedWindows.get(entryId);
-      if (staged) {
-        staged[name] = input.value;
-        updateDayActions();
-      }
-    });
-    return field;
-  };
-  const captureActiveWindow = () => {
-    if (!activeWindowId) return;
-    if (activeTimeInput && dayDialog.contains(activeTimeInput)) closePicker(true);
-    const row = dayReadonly.querySelector(`[data-active-day-window="${activeWindowId}"]`);
-    const staged = stagedWindows.get(activeWindowId);
-    if (!row || !staged) return;
-    staged.start_time = row.querySelector('[name="start_time"]').value;
-    staged.end_time = row.querySelector('[name="end_time"]').value;
-  };
-  const openDayDialog = (column) => {
-    if (!dayDialog) return;
-    activeDayColumn = column;
-    activeDay = column.dataset.day;
-    dayDialog.querySelector("#day-availability-title").textContent = `${activeDay} Availability`;
-    resetDayStaging(); renderDayWindows(); showStableDialog(dayDialog);
-  };
-  const requestCloseDayDialog = async () => {
-    captureActiveWindow();
-    if (hasStagedChanges()
-      && !await askUnsaved("You have availability changes that haven't been saved.")) return;
-    closePicker(false);
-    resetDayStaging();
-    closeStableDialog(dayDialog);
-  };
-  dayReadonly?.addEventListener("click", (event) => {
-    if (!canEditDay) return;
-    const remove = event.target.closest("[data-day-window-delete]");
-    if (remove) {
-      event.preventDefault();
-      event.stopPropagation();
-      const entry = stagedWindows.get(remove.dataset.dayWindowDelete);
-      if (!entry) return;
-      openAvailabilityDeleteConfirmation(entry.id, activeDay, "day");
+  availabilityForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (availabilitySaving) return;
+    if (activeTimeInput) closePicker(true);
+    const start = parseTime(availabilityForm.elements.start_time.value);
+    const end = parseTime(availabilityForm.elements.end_time.value);
+    if (start === null || end === null || end <= start) {
+      availabilityError.textContent = start === null || end === null
+        ? "Enter valid start and end times." : "End time must be later than start time.";
+      availabilityError.hidden = false;
+      positionAvailabilityPopover();
       return;
     }
-    const selected = event.target.closest("[data-day-window-select]");
-    if (!selected) return;
-    captureActiveWindow();
-    activeWindowId = selected.dataset.dayWindowSelect;
-    renderDayWindows();
-  });
-  dayReadonly?.addEventListener("keydown", (event) => {
-    const remove = event.target.closest("[data-day-window-delete]");
-    if (remove && (event.key === "Enter" || event.key === " ")) {
-      event.preventDefault();
-      remove.click();
-    }
-  });
-  dayDeleteCancelButtons?.forEach((button) => button.addEventListener("click", () => {
-    pendingDeleteId = null;
-    pendingDeleteMode = null;
-    pendingDeleteDay = null;
-    closeStableDialog(dayDeleteDialog);
-  }));
-  dayDeleteDialog?.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    pendingDeleteId = null;
-    pendingDeleteMode = null;
-    pendingDeleteDay = null;
-    closeStableDialog(dayDeleteDialog);
-  });
-  dayDeleteDialog?.addEventListener("click", (event) => {
-    if (event.target === dayDeleteDialog) {
-      pendingDeleteId = null;
-      pendingDeleteMode = null;
-      pendingDeleteDay = null;
-      closeStableDialog(dayDeleteDialog);
-    }
-  });
-  dayDeleteConfirm?.addEventListener("click", async () => {
-    if (!pendingDeleteId) return;
-    if (pendingDeleteMode === "specific") {
-      const id = pendingDeleteId;
-      dayDeleteConfirm.disabled = true;
-      try {
-        const response = await fetch(windowDialog.dataset.deleteUrlTemplate.replace("ENTRY_ID", id), {
-          method: "POST", headers: {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-          body: new URLSearchParams({return_to: windowForm.querySelector('[name="return_to"]').value}),
-        });
-        if (!response.ok) {
-          dayDeleteMessage.textContent = "This availability window could not be deleted.";
-          return;
-        }
-        removeAvailabilityBlock(id, pendingDeleteDay || windowDialog.dataset.entryDay);
-        pendingDeleteId = null; pendingDeleteMode = null; pendingDeleteDay = null;
-        closeStableDialog(dayDeleteDialog);
-        closeWindowDialog();
-      } finally {
-        dayDeleteConfirm.disabled = false;
-      }
-      return;
-    }
-    captureActiveWindow();
-    stagedWindows.delete(pendingDeleteId);
-    if (activeWindowId === pendingDeleteId) activeWindowId = null;
-    pendingDeleteId = null;
-    pendingDeleteMode = null;
-    pendingDeleteDay = null;
-    closeStableDialog(dayDeleteDialog);
-    renderDayWindows();
-  });
-  dayCancelButton?.addEventListener("click", () => {
-    closePicker(false); resetDayStaging(); renderDayWindows();
-  });
-  dayDialog?.querySelector("[data-day-dialog-close]")?.addEventListener("click", requestCloseDayDialog);
-  dayDialog?.addEventListener("pointerdown", (event) => {
-    const bounds = dayDialog.getBoundingClientRect();
-    const insideDialog = event.clientX >= bounds.left && event.clientX <= bounds.right
-      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
-    if (!insideDialog) return;
-    if (activeTimeInput && !dialog.contains(event.target) && event.target !== activeTimeInput) {
-      closePicker(true);
-    }
-    event.stopPropagation();
-  });
-  dayDialog?.addEventListener("click", (event) => {
-    if (event.target !== dayDialog) return;
-    const bounds = dayDialog.getBoundingClientRect();
-    const insideDialog = event.clientX >= bounds.left && event.clientX <= bounds.right
-      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
-    if (!insideDialog) requestCloseDayDialog();
-  });
-  dayDialog?.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    requestCloseDayDialog();
-  });
-  daySaveButton?.addEventListener("click", async () => {
-    captureActiveWindow();
-    const changes = Array.from(stagedWindows.values()).filter((entry) => windowIsDirty(entry.id)).map((entry) => ({
-      id: entry.id, deleted: false,
-      start_time: normalizedTime(entry.start_time),
-      end_time: normalizedTime(entry.end_time),
-    })).concat(Array.from(persistedWindows.keys()).filter((id) => !stagedWindows.has(id)).map((id) => ({
-      id, deleted: true, start_time: "", end_time: "",
-    })));
-    const invalid = changes.find((change) => !change.deleted && (!change.start_time || !change.end_time || change.end_time <= change.start_time));
-    const message = dayDialog.querySelector("[data-day-message]");
-    if (invalid) { message.textContent = "Enter valid times with the end after the start."; return; }
-    if (!changes.length) { updateDayActions(); return; }
-    const action = document.querySelector("[data-availability-bulk]").action;
-    daySaveButton.disabled = true;
+    const body = new FormData(availabilityForm), action = availabilityForm.action;
+    clearAvailabilityError();
+    setAvailabilitySaving(true);
     try {
-      const response = await fetch(action, {method: "POST", headers: {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}, body: new URLSearchParams({availability_payload: JSON.stringify(changes)})});
-      if (!response.ok) { const payload = await response.json(); message.textContent = payload.error || "Availability could not be saved."; return; }
-      changes.forEach((change) => {
-        if (change.deleted) removeAvailabilityBlock(change.id, activeDay);
-        else updateAvailabilityBlock({...change, day: activeDay});
-      });
-      resetDayStaging(); renderDayWindows();
-    } finally {
-      daySaveButton.disabled = false;
-    }
+      const payload = await availabilityRequest(action, body);
+      const block = updateAvailabilityBlock(payload.entry);
+      availabilitySelection.focusTarget = block;
+      availabilityStatus.textContent = "Weekly availability saved.";
+      setAvailabilitySaving(false);
+      closeAvailabilityPopover();
+    } catch (error) {
+      availabilityError.textContent = error.message || "The window could not be saved. Please try again.";
+      availabilityError.hidden = false;
+      positionAvailabilityPopover();
+    } finally { setAvailabilitySaving(false); }
+  });
+  availabilityPopover?.querySelector("[data-availability-delete]").addEventListener("click", () => {
+    deleteDialog.querySelector("[data-availability-delete-message]").textContent =
+      `${dateLabel(availabilitySelection.column)} · ${availabilityPopover.querySelector("[data-availability-time]").textContent}`;
+    deleteError.hidden = true;
+    showStableDialog(deleteDialog);
+  });
+  const cancelAvailabilityDelete = () => {
+    if (availabilitySaving) return;
+    closeStableDialog(deleteDialog);
+    availabilityPopover.querySelector("[data-availability-delete]").focus({preventScroll: true});
+  };
+  deleteDialog?.querySelectorAll("[data-availability-delete-cancel]").forEach((button) =>
+    button.addEventListener("click", cancelAvailabilityDelete));
+  deleteDialog?.addEventListener("cancel", (event) => { event.preventDefault(); cancelAvailabilityDelete(); });
+  deleteDialog?.querySelector("[data-availability-delete-confirm]").addEventListener("click", async () => {
+    if (availabilitySaving || !availabilitySelection?.block) return;
+    const {block, column} = availabilitySelection;
+    const action = availabilityPopover.dataset.deleteUrlTemplate.replace("ENTRY_ID", block.dataset.entryId);
+    const body = new URLSearchParams({return_to: availabilityForm.elements.return_to.value});
+    setAvailabilitySaving(true);
+    try {
+      await availabilityRequest(action, body);
+      block.remove();
+      refreshCombinedAvailability(column.dataset.day);
+      availabilitySelection.focusTarget = column.querySelector(".calendar-day-track");
+      availabilityStatus.textContent = "Weekly availability deleted.";
+      setAvailabilitySaving(false);
+      closeStableDialog(deleteDialog);
+      closeAvailabilityPopover();
+    } catch (error) {
+      deleteError.textContent = error.message || "The window could not be deleted. Please try again.";
+      deleteError.hidden = false;
+    } finally { setAvailabilitySaving(false); }
   });
 
   const planForm = document.querySelector("form[data-schedule-preview-url]");
