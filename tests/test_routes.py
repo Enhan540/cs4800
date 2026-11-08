@@ -1218,7 +1218,7 @@ def test_availability_picker_rejects_invalid_same_day_ranges(app_and_db, start, 
     assert database.availability.count_documents({"user_id": member_id}) == 0
 
 
-def test_availability_editor_has_weekdays_and_populates_edit_picker(app_and_db):
+def test_availability_chart_has_weekdays_and_saved_window_times(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one(
         {"display_name": "Alex", "normalized_name": "alex"}
@@ -1230,11 +1230,12 @@ def test_availability_editor_has_weekdays_and_populates_edit_picker(app_and_db):
 
     page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
 
-    assert all(f'data-availability-day="{day}"' in page for day in (
+    assert all(f'data-availability-calendar-day="{day}"' in page for day in (
         "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
     ))
-    assert 'value="06:35 PM"' in page
-    assert 'value="08:05 PM"' in page
+    assert 'data-start-time="18:35"' in page
+    assert 'data-end-time="20:05"' in page
+    assert 'data-availability-popover' in page
 
 
 def test_availability_back_link_preserves_group_or_member_parent(app_and_db):
@@ -1269,7 +1270,7 @@ def test_group_planning_contains_create_plan_and_branding_is_updated(app_and_db)
     assert "Group Planner" in dashboard
 
 
-def test_current_availability_shows_every_day_and_weekly_overview(app_and_db):
+def test_weekly_chart_replaces_separate_add_and_summary_sections(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one(
         {"display_name": "Alex", "normalized_name": "alex"}
@@ -1284,14 +1285,15 @@ def test_current_availability_shows_every_day_and_weekly_overview(app_and_db):
     ).get_data(as_text=True)
 
     assert "Weekly Overview" in page
-    assert "Current Availability" in page
-    assert all(f"<h3>{day}</h3>" in page for day in (
+    assert "Current Availability" not in page
+    assert all(f'data-availability-calendar-day="{day}"' in page for day in (
         "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
     ))
     assert "9:05 AM – 10:50 AM" in page
     assert "2:30 PM – 5:45 PM" in page
-    assert 'data-availability-bulk hidden' in page
-    assert 'data-availability-edit>Edit<' in page
+    assert 'data-availability-bulk' not in page
+    assert 'data-availability-add-form' not in page
+    assert 'Changes repeat every week.' in page
 
 
 def test_weekly_overview_uses_canonical_full_day_columns_for_all_seven_days(app_and_db):
@@ -1315,44 +1317,63 @@ def test_weekly_overview_uses_canonical_full_day_columns_for_all_seven_days(app_
 
     for day in days:
         assert f'data-availability-calendar-day="{day}" data-day="{day}"' in page
-        assert f'data-day="{day}" data-start-time="12:30 PM"' in page
+        assert f'data-day="{day}" data-start-time="12:30"' in page
     assert page.count('data-day="Monday" data-start-time=') == 2
-    assert 'data-day-availability-dialog' in page
+    assert 'data-availability-popover' in page
+    assert page.count('class="calendar-day-header"') == 7
+    assert 'calendar-time-axis' in page
 
 
-def test_empty_day_is_clickable_and_day_dialog_starts_read_only(app_and_db):
+def test_empty_chart_has_keyboard_access_and_date_time_only_popover(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one(
         {"display_name": "Alex", "normalized_name": "alex"}
     ).inserted_id
 
-    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
+    page = app.test_client().get(
+        f"/users/{member_id}/availability?week_start=2026-11-02"
+    ).get_data(as_text=True)
 
-    assert 'aria-label="Open Wednesday availability" data-availability-calendar-day="Wednesday"' in page
-    assert 'data-day-availability-dialog' in page
-    assert 'data-day-dialog-close' in page
-    assert 'data-day-dialog-cancel hidden>Cancel<' in page
-    assert 'data-day-dialog-save hidden>Save<' in page
-    assert 'data-day-dialog-exit' not in page
-    assert 'data-day-dialog-edit' not in page
-    assert 'data-day-delete-dialog' in page
-    assert 'data-day-delete-confirm' in page
+    assert 'Wednesday, November 4, 2026. Choose a time' in page
+    assert page.count('tabindex="0" role="group"') == 7
+    assert 'data-availability-preview' in page
+    assert 'data-availability-window-form hidden' in page
+    assert 'name="start_time"' in page and 'name="end_time"' in page
+    assert 'name="title"' not in page
+    assert 'data-day-availability-dialog' not in page
+    assert 'Delete this weekly window?' in page
+    assert 'This removes the availability window from every week.' in page
 
 
-def test_day_popup_delete_is_staged_through_existing_bulk_save_contract(app_and_db):
+def test_chart_crud_repeats_weekly_and_preserves_calendar_cache(app_and_db):
     app, database = app_and_db
     member_id = database.users.insert_one(
         {"display_name": "Alex", "normalized_name": "alex"}
     ).inserted_id
-    page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
-    javascript = app.test_client().get("/static/js/app.js").get_data(as_text=True)
-
-    assert 'data-day-delete-dialog' in page
-    assert 'data-day-delete-confirm' in page
-    assert 'data-day-window-delete' in javascript
-    assert 'deleted: true' in javascript
-    assert 'captureActiveWindow();' in javascript
-    assert 'data-day-dialog-save' in page
+    calendar_id = database.calendar_connections.insert_one({
+        "provider": "ical", "busy_intervals": [{"start": "09:00", "end": "09:50"}],
+    }).inserted_id
+    original_calendar = database.calendar_connections.find_one({"_id": calendar_id})
+    client = app.test_client()
+    headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+    created = client.post(f"/users/{member_id}/availability", headers=headers, data={
+        "day": "Wednesday", "start_time": "11:55 PM", "end_time": "11:59 PM",
+    })
+    assert created.status_code == 200
+    entry_id = created.json["entry"]["id"]
+    edited = client.post(f"/availability/{entry_id}/edit", headers=headers, data={
+        "day": "Wednesday", "start_time": "9:00 AM", "end_time": "10:00 AM",
+    })
+    assert edited.status_code == 200
+    assert edited.json["entry"]["start_time"] == "09:00"
+    for week in ("2026-11-02", "2026-11-09"):
+        page = client.get(f"/users/{member_id}/availability?week_start={week}").get_data(as_text=True)
+        assert f'data-entry-id="{entry_id}"' in page
+        assert 'data-day="Wednesday" data-start-time="09:00"' in page
+    deleted = client.post(f"/availability/{entry_id}/delete", headers=headers)
+    assert deleted.status_code == 200
+    assert database.availability.count_documents({"user_id": member_id}) == 0
+    assert database.calendar_connections.find_one({"_id": calendar_id}) == original_calendar
 
 
 def test_add_availability_preserves_selected_day_and_time_values(app_and_db):
@@ -1539,7 +1560,7 @@ def test_availability_page_emphasizes_member_and_uses_input_triggered_picker(app
     page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
 
     assert "<h1>Availability for Alex</h1>" in page
-    assert "<h2>Recurring Weekly Availability</h2>" in page
+    assert "<h2>Weekly Overview</h2>" in page
     assert page.count("data-unified-time") >= 2
     assert "data-time-picker-trigger" not in page
 
@@ -1567,8 +1588,8 @@ def test_weekly_blocks_map_to_persisted_windows_and_single_window_edit(app_and_d
     page = app.test_client().get(f"/users/{member_id}/availability").get_data(as_text=True)
     assert f'data-entry-id="{first_id}"' in page
     assert f'data-entry-id="{second_id}"' in page
-    assert 'data-start-time="01:00 PM"' in page
-    assert 'data-end-time="03:00 PM"' in page
+    assert 'data-start-time="13:00"' in page
+    assert 'data-end-time="15:00"' in page
 
     response = app.test_client().post(
         f"/availability/{second_id}/edit",

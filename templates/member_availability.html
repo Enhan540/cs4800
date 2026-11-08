@@ -1,48 +1,92 @@
 {% extends "base.html" %}
 {% block title %}{{ user.display_name }} availability | Group Planner{% endblock %}
-{% macro time_picker(name, value, label) -%}
-  <label class="unified-time-input"><span>{{ label }}</span><span class="unified-time-control"><input name="{{ name }}" type="text" value="{{ value|time_input }}" inputmode="text" autocomplete="off" aria-label="{{ label }}, for example 2:35 PM" data-unified-time></span></label>
-{%- endmacro %}
 {% block content %}
 <a class="back-link" href="{{ return_to }}">← Back to {{ return_label }}</a>
-<section class="page-heading with-back-link availability-heading"><div><p class="eyebrow">Recurring weekly availability</p><h1>Availability for {{ user.display_name }}</h1><p class="muted">Set {{ user.display_name }}'s usual availability for group planning.</p></div><span class="status-badge attending">Weekly schedule</span></section>
-
-<section class="card availability-editor" data-availability-editor data-availability-user-id="{{ user._id }}" data-availability-editable="{{ 'true' if can_edit_availability else 'false' }}">
-  <div class="section-heading"><div><h2>Recurring Weekly Availability</h2><p class="muted small section-subtitle">Select a day and add recurring free-time windows.</p></div><span class="pill">5-minute precision</span></div>
-  <div class="weekday-tabs" role="tablist" aria-label="Weekdays">{% for day in days %}<button id="availability-tab-{{ loop.index }}" class="weekday-tab {% if day == editor_state.selected_day %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if day == editor_state.selected_day else 'false' }}" aria-controls="availability-panel-{{ loop.index }}" data-availability-day="{{ day }}">{{ day[:3] }}</button>{% endfor %}</div>
-  {% for day in days %}<div id="availability-panel-{{ loop.index }}" class="availability-day-panel {% if day != editor_state.selected_day %}is-hidden{% endif %}" role="tabpanel" aria-labelledby="availability-tab-{{ loop.index }}" data-availability-panel="{{ day }}"><h3>Add Availability · {{ day }}</h3><form method="post" action="{{ url_for('member_availability', user_id=user._id) }}" class="availability-add-form" data-availability-add-form><input type="hidden" name="day" value="{{ day }}"><input type="hidden" name="selected_day" value="{{ day }}" data-selected-day><input type="hidden" name="return_to" value="{{ return_to }}"><div class="time-picker-grid">{{ time_picker('start_time', editor_state.start_time, 'Start time') }}{{ time_picker('end_time', editor_state.end_time, 'End time') }}</div><p class="field-help" data-availability-form-message>Type any valid minute or use the picker’s five-minute options.</p><button class="button" type="submit">+ Add Availability Window</button></form></div>{% endfor %}
+<section class="page-heading with-back-link availability-heading">
+  <div><p class="eyebrow">Recurring weekly availability</p><h1>Availability for {{ user.display_name }}</h1><p class="muted">Set {{ user.display_name }}'s usual availability for group planning. Changes repeat every week.</p></div>
+  <span class="status-badge attending">Weekly schedule</span>
 </section>
 
 <section class="card content-section weekly-overview">
-  <div class="section-heading"><div><h2>Weekly Overview</h2><p class="muted small section-subtitle">Pale green is your recurring schedule; bright green is free after calendar conflicts. Select a recurring window to edit it.</p></div><div class="week-navigation"><a class="button secondary" href="{{ url_for('member_availability', user_id=user._id, return_to=return_to, week_start=previous_week) }}" aria-label="Previous week">‹</a><strong>{{ week_start.strftime('%b') }} {{ week_start.day }} – {{ week_end.strftime('%b') }} {{ week_end.day }}</strong><a class="button secondary" href="{{ url_for('member_availability', user_id=user._id, return_to=return_to, week_start=next_week) }}" aria-label="Next week">›</a></div></div>
+  <div class="section-heading">
+    <div><h2>Weekly Overview</h2><p class="muted small section-subtitle">Pale green is your recurring schedule; bright green is free after calendar conflicts.</p></div>
+    <div class="week-navigation">
+      <a class="button secondary" href="{{ url_for('member_availability', user_id=user._id, return_to=return_to, week_start=previous_week) }}" aria-label="Previous week">‹</a>
+      <strong>{{ week_start.strftime('%b') }} {{ week_start.day }} – {{ week_end.strftime('%b') }} {{ week_end.day }}</strong>
+      <a class="button secondary" href="{{ url_for('member_availability', user_id=user._id, return_to=return_to, week_start=next_week) }}" aria-label="Next week">›</a>
+    </div>
+  </div>
   {% for warning in calendar_warnings %}<p class="result-notice" role="status">{{ warning }}</p>{% endfor %}
-  <div class="calendar-mask-legend" aria-label="Calendar layers"><span><i class="calendar-legend-swatch calendar-legend-baseline"></i>Recurring</span><span><i class="calendar-legend-swatch calendar-legend-effective"></i>Actually free</span>{% for source in calendar_sources %}<button type="button" class="calendar-source-filter" data-calendar-filter="{{ source.id }}" aria-pressed="false" title="Show only {{ source.name }} busy mask"><i class="calendar-legend-swatch calendar-color-{{ source.color }}"></i>{{ source.name }}</button>{% endfor %}</div>
-  <div class="weekly-calendar" role="region" aria-label="Weekly availability overview for {{ user.display_name }}">
-    <div class="calendar-time-axis"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>12 AM</span></div>
-<div class="calendar-day-columns">{% for day in days %}<div class="calendar-day" role="button" tabindex="0" aria-label="Open {{ day }} availability" data-availability-calendar-day="{{ day }}" data-day="{{ day }}" data-date="{{ effective_days[loop.index0].date.isoformat() }}"><strong class="calendar-day-header">{{ day[:3] }}<small>{{ effective_days[loop.index0].date.day }}</small></strong><div class="calendar-day-track">{% set current_date = effective_days[loop.index0].date %}{% for entry in entries if entry.day == day %}{% set editable = can_edit_availability %}{% set interval_label = day ~ ' availability, ' ~ (entry.start_time|time12) ~ ' to ' ~ (entry.end_time|time12) %}{% if editable %}<button class="calendar-window availability-window-block" type="button" title="{{ entry.start_time|time12 }} - {{ entry.end_time|time12 }}" aria-label="{{ interval_label }}. Edit availability." data-availability-window data-entry-id="{{ entry._id }}" data-day="{{ day }}" data-start-time="{{ entry.start_time|time_input }}" data-end-time="{{ entry.end_time|time_input }}" style="top: {{ ((entry.start_time|time_minutes) / 1440 * 100)|round(2) }}%; height: {{ (((entry.end_time|time_minutes) - (entry.start_time|time_minutes)) / 1440 * 100)|round(2) }}%;"><span class="availability-window-label">{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}</span></button>{% else %}<span class="calendar-window" title="{{ entry.start_time|time12 }} - {{ entry.end_time|time12 }}" aria-label="{{ interval_label }}" role="img" data-availability-window-readonly data-entry-id="{{ entry._id }}" data-day="{{ day }}" data-start-time="{{ entry.start_time|time_input }}" data-end-time="{{ entry.end_time|time_input }}" style="top: {{ ((entry.start_time|time_minutes) / 1440 * 100)|round(2) }}%; height: {{ (((entry.end_time|time_minutes) - (entry.start_time|time_minutes)) / 1440 * 100)|round(2) }}%;"><span class="availability-window-label">{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}</span></span>{% endif %}{% endfor %}{% for source in calendar_sources %}{% for busy in source.days[current_date.isoformat()] %}<span class="calendar-busy-mask calendar-color-{{ source.color }}" data-calendar-mask data-calendar-source="{{ source.id }}" data-start-minute="{{ busy.start_minutes }}" data-end-minute="{{ busy.end_minutes }}" style="top: {{ (busy.start_minutes / 1440 * 100)|round(3) }}%; height: {{ ((busy.end_minutes - busy.start_minutes) / 1440 * 100)|round(3) }}%;" role="img" aria-label="{{ source.name }} busy on {{ current_date.strftime('%A, %B') }} {{ current_date.day }} from {{ '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 }} to {{ '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 }}" title="{{ source.name }} busy · {{ '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 }}–{{ '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 }}"></span>{% endfor %}{% endfor %}{% for start, end in effective_days[loop.index0].windows %}{% set start_minute = start.hour * 60 + start.minute %}{% set end_minute = end.hour * 60 + end.minute if end.date() == current_date else 1440 %}<span class="calendar-effective-window" data-effective-window style="top: {{ (start_minute / 1440 * 100)|round(3) }}%; height: {{ ((end_minute - start_minute) / 1440 * 100)|round(3) }}%;" role="img" aria-label="Actually free on {{ current_date.strftime('%A, %B') }} {{ current_date.day }} from {{ '%02d:%02d'|format(start_minute // 60, start_minute % 60)|time12 }} to {{ '%02d:%02d'|format(end_minute // 60, end_minute % 60)|time12 }}"></span>{% endfor %}</div></div>{% endfor %}</div>
+  {% if can_edit_availability %}
+    <p class="field-help" id="availability-chart-help">Click an empty time to add a weekly window, or select a window to view, edit, or delete it. With a day focused, use arrow keys to choose a time and Enter to add.</p>
+  {% endif %}
+  <div class="calendar-mask-legend" aria-label="Calendar layers">
+    <span><i class="calendar-legend-swatch calendar-legend-baseline"></i>Recurring</span>
+    <span><i class="calendar-legend-swatch calendar-legend-effective"></i>Actually free</span>
+    {% for source in calendar_sources %}<button type="button" class="calendar-source-filter" data-calendar-filter="{{ source.id }}" aria-pressed="false" title="Show only {{ source.name }} busy mask"><i class="calendar-legend-swatch calendar-color-{{ source.color }}"></i>{{ source.name }}</button>{% endfor %}
+  </div>
+  <p class="field-help" data-availability-status role="status" aria-live="polite"></p>
+  <div class="weekly-calendar" role="region" aria-label="Weekly availability overview for {{ user.display_name }}" data-availability-editable="{{ 'true' if can_edit_availability else 'false' }}">
+    <div class="calendar-grid">
+      <div class="calendar-axis-header" aria-hidden="true"></div>
+      {% for date_info in effective_days %}<strong class="calendar-day-header">{{ days[loop.index0][:3] }}<small>{{ date_info.date.day }}</small></strong>{% endfor %}
+      <div class="calendar-time-axis" aria-hidden="true">
+        {% for hour in range(25) %}<span style="top: {{ hour / 24 * 100 }}%">{{ (hour % 12) or 12 }} {{ 'AM' if hour < 12 or hour == 24 else 'PM' }}</span>{% endfor %}
+      </div>
+      {% for day in days %}
+      {% set current_date = effective_days[loop.index0].date %}
+      <div class="calendar-day" data-availability-calendar-day="{{ day }}" data-day="{{ day }}" data-date="{{ current_date.isoformat() }}">
+        <div class="calendar-day-track" {% if can_edit_availability %}tabindex="0" role="group" aria-label="{{ current_date.strftime('%A, %B') }} {{ current_date.day }}, {{ current_date.year }}. Choose a time to add weekly availability." aria-describedby="availability-chart-help"{% endif %}>
+          {% for entry in entries if entry.day == day %}
+            {% set interval_label = current_date.strftime('%A, %B') ~ ' ' ~ current_date.day ~ ', ' ~ (entry.start_time|time12) ~ ' to ' ~ (entry.end_time|time12) %}
+            {% if can_edit_availability %}
+            <button class="calendar-window availability-window-block" type="button" title="{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}" aria-label="{{ interval_label }}. View weekly availability." aria-haspopup="dialog" data-availability-window
+            {% else %}
+            <span class="calendar-window" title="{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}" aria-label="{{ interval_label }}" role="img" data-availability-window-readonly
+            {% endif %}
+              data-entry-id="{{ entry._id }}" data-day="{{ day }}" data-start-time="{{ entry.start_time }}" data-end-time="{{ entry.end_time }}" style="top: {{ ((entry.start_time|time_minutes) / 1440 * 100)|round(3) }}%; height: {{ (((entry.end_time|time_minutes) - (entry.start_time|time_minutes)) / 1440 * 100)|round(3) }}%;">
+              <span class="availability-window-label">{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}</span>
+            {% if can_edit_availability %}</button>{% else %}</span>{% endif %}
+          {% endfor %}
+          {% for source in calendar_sources %}{% for busy in source.days[current_date.isoformat()] %}
+            <span class="calendar-busy-mask calendar-color-{{ source.color }}" data-calendar-mask data-calendar-source="{{ source.id }}" data-start-minute="{{ busy.start_minutes }}" data-end-minute="{{ busy.end_minutes }}" style="top: {{ (busy.start_minutes / 1440 * 100)|round(3) }}%; height: {{ ((busy.end_minutes - busy.start_minutes) / 1440 * 100)|round(3) }}%;" role="img" tabindex="0" aria-label="{{ source.name }} busy on {{ current_date.strftime('%A, %B') }} {{ current_date.day }} from {{ '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 }} to {{ '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 }}" title="{{ source.name }} busy · {{ '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 }}–{{ '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 }}"></span>
+          {% endfor %}{% endfor %}
+          {% for start, end in effective_days[loop.index0].windows %}
+            {% set start_minute = start.hour * 60 + start.minute %}
+            {% set end_minute = end.hour * 60 + end.minute if end.date() == current_date else 1440 %}
+            <span class="calendar-effective-window" data-effective-window style="top: {{ (start_minute / 1440 * 100)|round(3) }}%; height: {{ ((end_minute - start_minute) / 1440 * 100)|round(3) }}%;" role="img" aria-label="Actually free on {{ current_date.strftime('%A, %B') }} {{ current_date.day }} from {{ '%02d:%02d'|format(start_minute // 60, start_minute % 60)|time12 }} to {{ '%02d:%02d'|format(end_minute // 60, end_minute % 60)|time12 }}"></span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
   </div>
 </section>
 
-<dialog class="app-dialog availability-window-dialog" data-availability-window-dialog data-edit-url-template="{{ url_for('edit_availability', availability_id='ENTRY_ID') }}" data-delete-url-template="{{ url_for('delete_availability', availability_id='ENTRY_ID') }}" aria-labelledby="availability-window-title">
-  <div class="dialog-heading"><div><p class="eyebrow">Weekly Availability</p><h2 id="availability-window-title">Edit Availability</h2></div><button class="icon-button" type="button" data-window-dialog-close aria-label="Close">×</button></div>
-  <form method="post" data-availability-window-form><input type="hidden" name="day" data-window-day><input type="hidden" name="return_to" value="{{ return_to }}"><label class="unified-time-input"><span>Start Time</span><span class="unified-time-control"><input name="start_time" type="text" inputmode="text" autocomplete="off" required data-unified-time data-window-start></span></label><label class="unified-time-input"><span>End Time</span><span class="unified-time-control"><input name="end_time" type="text" inputmode="text" autocomplete="off" required data-unified-time data-window-end></span></label><div class="dialog-actions"><button class="button danger" type="button" data-window-dialog-delete>Delete Window</button><span></span><button class="button secondary" type="button" data-window-dialog-cancel>Cancel</button><button class="button" type="submit">Save</button></div></form>
+{% if can_edit_availability %}
+<dialog class="availability-popover" data-availability-popover data-create-url="{{ url_for('member_availability', user_id=user._id) }}" data-edit-url-template="{{ url_for('edit_availability', availability_id='ENTRY_ID') }}" data-delete-url-template="{{ url_for('delete_availability', availability_id='ENTRY_ID') }}" aria-labelledby="availability-popover-date">
+  <div class="dialog-heading"><h2 id="availability-popover-date" data-availability-date></h2><button class="icon-button" type="button" data-availability-close aria-label="Close availability">×</button></div>
+  <div data-availability-preview>
+    <p class="availability-preview-time" data-availability-time></p>
+    <div class="dialog-actions"><button class="button secondary" type="button" data-availability-delete>Delete</button><button class="button" type="button" data-availability-edit>Edit</button></div>
+  </div>
+  <form method="post" data-availability-window-form hidden>
+    <input type="hidden" name="day"><input type="hidden" name="return_to" value="{{ return_to }}">
+    <div class="availability-time-fields">
+      <label class="unified-time-input"><span>Start time</span><span class="unified-time-control"><input name="start_time" type="text" inputmode="text" autocomplete="off" required data-unified-time></span></label>
+      <label class="unified-time-input"><span>End time</span><span class="unified-time-control"><input name="end_time" type="text" inputmode="text" autocomplete="off" required data-unified-time></span></label>
+    </div>
+    <div class="dialog-actions"><button class="button secondary" type="button" data-availability-cancel>Cancel</button><button class="button" type="submit">Save</button></div>
+  </form>
+  <p class="field-help error-text" data-availability-error role="alert" hidden></p>
 </dialog>
 
-<dialog class="app-dialog day-availability-dialog" data-day-availability-dialog data-editable="{{ 'true' if can_edit_availability else 'false' }}" aria-labelledby="day-availability-title">
-  <div class="dialog-heading"><div><p class="eyebrow">Weekly Availability</p><h2 id="day-availability-title">Day Availability</h2></div><button class="icon-button" type="button" data-day-dialog-close aria-label="Close">×</button></div>
-  <div class="day-availability-content"><div data-day-readonly></div><p class="field-help" data-day-message></p></div>
-  <div class="dialog-actions day-availability-actions"><button class="button secondary" type="button" data-day-dialog-cancel hidden>Cancel</button><button class="button" type="button" data-day-dialog-save hidden>Save</button></div>
+<dialog class="app-dialog confirm-dialog" data-availability-delete-dialog aria-labelledby="availability-delete-title">
+  <div class="dialog-heading"><h2 id="availability-delete-title">Delete this weekly window?</h2><button class="icon-button" type="button" data-availability-delete-cancel aria-label="Close confirmation">×</button></div>
+  <p data-availability-delete-message></p>
+  <p>This removes the availability window from every week.</p>
+  <p class="field-help error-text" data-availability-delete-error role="alert" hidden></p>
+  <div class="dialog-actions"><button class="button secondary" type="button" data-availability-delete-cancel>Cancel</button><button class="button danger" type="button" data-availability-delete-confirm>Delete</button></div>
 </dialog>
-
-<dialog class="app-dialog confirm-dialog" data-day-delete-dialog aria-labelledby="day-delete-title">
-  <div class="dialog-heading"><div><p class="eyebrow">Delete Availability</p><h2 id="day-delete-title">Delete Availability?</h2></div><button class="icon-button" type="button" data-day-delete-cancel aria-label="Close">×</button></div>
-  <p data-day-delete-message>Are you sure you want to remove this availability window?</p>
-  <div class="dialog-actions"><button class="button secondary" type="button" data-day-delete-cancel>Cancel</button><button class="button danger" type="button" data-day-delete-confirm>Delete</button></div>
-</dialog>
-
-<section class="card content-section current-availability" data-current-availability>
-  <div class="section-heading"><div><h2>Current Availability</h2><p class="muted small section-subtitle">Your saved recurring availability for every day.</p></div><div class="button-row heading-actions"><button class="button secondary" type="button" data-availability-edit>Edit</button><button class="button secondary" type="button" data-availability-cancel hidden>Cancel</button><button class="button" type="button" data-availability-save hidden>Save</button></div></div>
-  <div data-availability-readonly>{% for day in days %}{% set day_entries = entries|selectattr('day', 'equalto', day)|list %}<article class="availability-summary-day" data-summary-day="{{ day }}"><h3>{{ day }}</h3><div data-summary-windows>{% if day_entries %}{% for entry in day_entries %}<p data-summary-entry-id="{{ entry._id }}">{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}</p>{% endfor %}{% else %}<p class="muted" data-summary-empty>No availability</p>{% endif %}</div></article>{% endfor %}</div>
-  <form method="post" action="{{ url_for('bulk_edit_availability', user_id=user._id, return_to=return_to) }}" data-availability-bulk hidden><input type="hidden" name="availability_payload" data-availability-payload><div class="availability-list">{% for day in days %}{% set day_entries = entries|selectattr('day', 'equalto', day)|list %}<section class="availability-edit-day"><h3>{{ day }}</h3>{% if day_entries %}{% for entry in day_entries %}<article class="card availability-row" data-availability-entry data-entry-id="{{ entry._id }}"><div class="time-picker-grid compact-time-picker-grid">{{ time_picker('start_time', entry.start_time, 'Start time') }}{{ time_picker('end_time', entry.end_time, 'End time') }}</div><button class="remove-window" type="button" aria-label="Remove availability window" title="Remove availability window" data-remove-availability>×</button></article>{% endfor %}{% else %}<p class="muted small">No availability</p>{% endif %}</section>{% endfor %}</div></form>
-</section>
+{% endif %}
 {% endblock %}
