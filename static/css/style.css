@@ -198,6 +198,14 @@ a:hover { color: var(--primary-hover); }
 .account-page > h1, .account-page > .muted, .account-section h2, .account-section h3 { margin-bottom: 0; }
 .account-section { display: grid; gap: 1rem; }
 .compact-form { max-width: 34rem; }
+.ical-help { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-low); padding: .85rem 1rem; }
+.ical-help > summary { cursor: pointer; color: var(--primary); font-family: var(--font-heading); font-weight: 700; }
+.ical-help > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.ical-help-content { display: grid; gap: 1rem; padding-top: 1rem; }
+.ical-help-content p, .ical-help-content ol { margin: 0; }
+.ical-help-content ol { display: grid; gap: .45rem; padding-left: 1.3rem; }
+.ical-help-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; }
+.ical-help-choices section { display: grid; align-content: start; gap: .55rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-raised); padding: .85rem; }
 .availability-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: .65rem; }
 .availability-summary-grid article { display: grid; gap: .25rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-low); padding: .75rem; }
 .availability-summary-grid span { font-size: .85rem; }

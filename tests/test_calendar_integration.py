@@ -292,6 +292,33 @@ def test_multiple_ical_feeds_and_duplicate_url_update(calendar_app, monkeypatch)
     assert b"Work calendar" in client.get("/account").data
 
 
+def test_account_shows_google_ical_guide_without_exposing_subscription_url(calendar_app):
+    app, database = calendar_app
+    app.config["LOGIN_DISABLED"] = False
+    client = app.test_client()
+    client.post("/register", data={
+        "username": "guide-owner", "password": "correct-horse",
+        "confirm_password": "correct-horse",
+    })
+    account = database.accounts.find_one({"normalized_username": "guide-owner"})
+    secret_url = "https://calendar.google.com/calendar/ical/owner/private-secret/basic.ics"
+    database.calendar_connections.insert_one({
+        "account_id": account["_id"], "provider": "ical",
+        "display_name": "Personal", "sync_status": "connected",
+        "secret_ciphertext": encrypted({"url": secret_url}),
+    })
+
+    account_page = client.get("/account").get_data(as_text=True)
+    privacy_page = client.get("/privacy").get_data(as_text=True)
+
+    assert '<details class="ical-help">' in account_page
+    assert "How to add a Google calendar with iCal" in account_page
+    assert "Secret address" in account_page and "Public free/busy address" in account_page
+    assert "name=\"calendar_url\"" in account_page
+    assert secret_url not in account_page
+    assert "We encrypt the subscription URL" in privacy_page
+
+
 @pytest.mark.parametrize("category, status, message", [
     ("rate_limited", 429, b"limiting requests (HTTP 429)"),
     ("not_found", 404, b"not found (HTTP 404)"),

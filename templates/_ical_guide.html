@@ -1,0 +1,25 @@
+<details class="ical-help">
+  <summary>How to add a Google calendar with iCal</summary>
+  <div class="ical-help-content">
+    <ol>
+      <li>On a computer, open Google Calendar, then open <strong>Settings</strong>.</li>
+      <li>Under <strong>Settings for my calendars</strong>, choose the calendar you want to add.</li>
+      <li>Choose one of the iCal addresses below and copy it from <strong>Integrate calendar</strong>.</li>
+      <li>Enter a calendar name above, paste the full HTTPS iCal address into the subscription URL field, and select <strong>Add Calendar</strong>.</li>
+    </ol>
+    <div class="ical-help-choices">
+      <section>
+        <h3>Secret address</h3>
+        <p>Your calendar can stay private. Copy <strong>Secret address in iCal format</strong>. Anyone with this link can read the feed, so keep it private and reset it in Google Calendar if it is exposed.</p>
+        <a href="https://support.google.com/calendar/answer/37648" target="_blank" rel="noopener noreferrer">Google's secret address instructions</a>
+      </section>
+      <section>
+        <h3>Public free/busy address</h3>
+        <p>Under <strong>Access permissions for events</strong>, enable <strong>Make available to public</strong> and choose <strong>See only free/busy (hide details)</strong>. Then copy <strong>Public address in iCal format</strong>. Anyone can see your busy times.</p>
+        <a href="https://support.google.com/calendar/answer/37083?hl=en" target="_blank" rel="noopener noreferrer">Google's public calendar instructions</a>
+      </section>
+    </div>
+    <p>Use the iCal address, not a regular Google Calendar page link. If Google returns HTTP 404, check the public sharing setting and copy the address again. If it returns HTTP 429, try again later.</p>
+    <p>Group Planner reads the feed to find busy times and saves only those times. An iCal feed can contain event details while it is fetched. <a href="{{ url_for('privacy') }}">How calendar data is used</a></p>
+  </div>
+</details>
