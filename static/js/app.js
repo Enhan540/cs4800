@@ -1,5 +1,24 @@
 const NOTIFICATION_POLL_INTERVAL_MS = 45 * 1000;
 
+// Partition overlapping busy intervals into lanes; touching endpoints do not overlap.
+const calendarBusyLayout = (windows) => {
+  const sorted = windows.map((window, index) => ({...window, index}))
+    .sort((a, b) => a.start - b.start || a.end - b.end || a.index - b.index);
+  const result = [];
+  let group = [], ends = [], groupEnd = -Infinity;
+  const finish = () => group.forEach((item) => result.push({...item, lanes: ends.length}));
+  sorted.forEach((item) => {
+    if (item.start >= groupEnd) { finish(); group = []; ends = []; }
+    let lane = ends.findIndex((end) => end <= item.start);
+    if (lane < 0) lane = ends.length;
+    ends[lane] = item.end;
+    group.push({...item, lane});
+    groupEnd = Math.max(...ends);
+  });
+  finish();
+  return result;
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   const sidebar = document.querySelector("[data-app-sidebar]");
   const closeSidebar = () => document.body.classList.remove("sidebar-open");
@@ -698,20 +717,87 @@ document.addEventListener("DOMContentLoaded", () => {
     const label = `${availabilityTimeText(entry.start_time)} – ${availabilityTimeText(entry.end_time)}`;
     block.querySelector(".availability-window-label").textContent = label;
     block.title = label;
-    block.setAttribute("aria-label", `${track.parentElement.dataset.date}, ${label}. View weekly availability.`);
+    block.setAttribute("aria-label", `Set availability on ${track.parentElement.dataset.date}, ${label}. View weekly availability.`);
     refreshCombinedAvailability(entry.day);
     return block;
   };
 
   const weeklyCalendar = document.querySelector(".weekly-calendar");
-  document.querySelectorAll("[data-calendar-filter]").forEach((button) => button.addEventListener("click", () => {
-    const selected = button.getAttribute("aria-pressed") === "true" ? null : button.dataset.calendarFilter;
-    document.querySelectorAll("[data-calendar-filter]").forEach((item) =>
-      item.setAttribute("aria-pressed", String(item.dataset.calendarFilter === selected)));
-    document.querySelectorAll("[data-calendar-mask]").forEach((mask) => {
-      mask.hidden = Boolean(selected && mask.dataset.calendarSource !== selected);
+  const layoutCalendarMasks = () => {
+    weeklyCalendar?.querySelectorAll(".calendar-day-track").forEach((track) => {
+      const masks = Array.from(track.querySelectorAll("[data-calendar-mask]")).filter((mask) => !mask.hidden);
+      calendarBusyLayout(masks.map((mask) => ({
+        start: Number(mask.dataset.startMinute), end: Number(mask.dataset.endMinute),
+      }))).forEach(({index, lane, lanes}) => {
+        masks[index].style.left = `calc(${lane / lanes * 100}% + .18rem)`;
+        masks[index].style.right = `calc(${(lanes - lane - 1) / lanes * 100}% + .18rem)`;
+      });
     });
-  }));
+  };
+  const busyTooltip = document.createElement("div");
+  busyTooltip.className = "calendar-busy-tooltip";
+  busyTooltip.id = "calendar-busy-tooltip";
+  busyTooltip.setAttribute("role", "tooltip");
+  busyTooltip.hidden = true;
+  if (weeklyCalendar) document.body.appendChild(busyTooltip);
+  let tooltipMask = null;
+  const hideBusyTooltip = () => {
+    tooltipMask?.removeAttribute("aria-describedby");
+    tooltipMask = null;
+    busyTooltip.hidden = true;
+  };
+  const positionBusyTooltip = () => {
+    if (!tooltipMask) return;
+    const bounds = tooltipMask.getBoundingClientRect();
+    busyTooltip.style.left = `${Math.max(12, Math.min(bounds.left, window.innerWidth - busyTooltip.offsetWidth - 12))}px`;
+    busyTooltip.style.top = `${Math.max(12, bounds.top > busyTooltip.offsetHeight + 16
+      ? bounds.top - busyTooltip.offsetHeight - 4
+      : Math.min(bounds.bottom + 4, window.innerHeight - busyTooltip.offsetHeight - 12))}px`;
+  };
+  const showBusyTooltip = (mask) => {
+    if (mask.hidden) return;
+    hideBusyTooltip();
+    tooltipMask = mask;
+    busyTooltip.textContent = mask.getAttribute("aria-label");
+    busyTooltip.hidden = false;
+    mask.setAttribute("aria-describedby", busyTooltip.id);
+    positionBusyTooltip();
+  };
+  weeklyCalendar?.querySelectorAll("[data-calendar-mask]").forEach((mask) => {
+    mask.addEventListener("mouseenter", () => showBusyTooltip(mask));
+    mask.addEventListener("focus", () => showBusyTooltip(mask));
+    mask.addEventListener("mouseleave", (event) => {
+      if (!busyTooltip.contains(event.relatedTarget) && document.activeElement !== mask) hideBusyTooltip();
+    });
+    mask.addEventListener("blur", () => { if (!busyTooltip.matches(":hover")) hideBusyTooltip(); });
+    mask.addEventListener("click", hideBusyTooltip);
+  });
+  busyTooltip.addEventListener("mouseleave", () => {
+    if (document.activeElement !== tooltipMask) hideBusyTooltip();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !busyTooltip.hidden) {
+      hideBusyTooltip(); event.preventDefault(); event.stopImmediatePropagation();
+    }
+  });
+  window.addEventListener("scroll", () => {
+    // Keyboard focus can scroll a small block into view after its focus event.
+    if (tooltipMask && document.activeElement === tooltipMask) positionBusyTooltip();
+    else hideBusyTooltip();
+  }, true);
+  window.addEventListener("resize", hideBusyTooltip);
+  document.querySelectorAll("[data-calendar-filter]").forEach((checkbox) => {
+    // Visibility is a page-local choice, independent of calendar selection for scheduling.
+    checkbox.checked = true;
+    checkbox.addEventListener("change", () => {
+      hideBusyTooltip();
+      document.querySelectorAll("[data-calendar-mask]").forEach((mask) => {
+        if (mask.dataset.calendarSource === checkbox.dataset.calendarFilter) mask.hidden = !checkbox.checked;
+      });
+      layoutCalendarMasks();
+    });
+  });
+  layoutCalendarMasks();
   // One pixel per minute keeps small windows selectable, with 8 AM visible initially.
   if (weeklyCalendar) weeklyCalendar.scrollTop = 480;
   const availabilityPopover = document.querySelector("[data-availability-popover]");

@@ -165,6 +165,53 @@ def test_member_chart_keeps_calendar_sources_separate_and_private(calendar_app):
     assert "Private doctor visit" not in page
 
 
+def test_busy_labels_and_checkboxes_identify_each_calendar(calendar_app):
+    app, database = calendar_app
+    account, member, _group = planning_group(database)
+    interval = {"start": datetime(2026, 11, 2, 18), "end": datetime(2026, 11, 2, 18, 50)}
+    cached = {
+        "account_id": account, "sync_status": "connected", "busy_intervals": [interval],
+        "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+    }
+    database.calendar_connections.insert_many([
+        {**cached, "provider": "google", "secret_ciphertext": encrypted({
+            "selected_calendars": [{"id": "primary", "name": "School"}, {"id": "secondary", "name": "Personal"}],
+        }), "busy_sources": [{"busy_intervals": [interval]}, {"busy_intervals": []}]},
+        {**cached, "provider": "ical", "source_key": "work-one", "display_name": "Work"},
+        {**cached, "provider": "ical", "source_key": "work-two", "display_name": "Work"},
+        {**cached, "provider": "ical", "source_key": "unnamed"},
+    ])
+    page = app.test_client().get(f"/users/{member}/availability?week_start=2026-11-02").get_data(as_text=True)
+    assert 'BUSY (Google Calendar · School)' in page
+    assert 'Google Calendar · Personal</span>' in page  # Empty calendars still have a checkbox.
+    assert 'BUSY (Work)' in page and 'BUSY (Work (2))' in page
+    assert 'BUSY (iCal calendar)' in page
+    assert page.count('type="checkbox" data-calendar-filter=') == 5
+    assert page.count('aria-describedby="calendar-display-help" checked') == 5
+    assert '10:00 AM – 10:50 AM</span>' in page
+    assert 'Actually free time still accounts for every connected calendar' in page
+    assert 'Set availability</span>' in page
+
+
+def test_busy_block_labels_use_clipped_local_times_at_midnight(calendar_app):
+    app, database = calendar_app
+    account, member, _group = planning_group(database)
+    database.calendar_connections.insert_one({
+        "account_id": account, "provider": "ical", "display_name": "Night shift",
+        "sync_status": "connected", "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+        "busy_intervals": [{"start": datetime(2026, 11, 3, 7, 45), "end": datetime(2026, 11, 3, 8, 15)}],
+    })
+    page = app.test_client().get(f"/users/{member}/availability?week_start=2026-11-02").get_data(as_text=True)
+    assert 'data-start-minute="1425" data-end-minute="1440"' in page
+    assert 'data-start-minute="0" data-end-minute="15"' in page
+    assert '11:45 PM – 12:00 AM</span>' in page
+    assert '12:00 AM – 12:15 AM</span>' in page
+
+
 def test_member_chart_shows_busy_time_outside_recurring_window(calendar_app):
     app, database = calendar_app
     account, member, _group = planning_group(database)
