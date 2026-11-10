@@ -3140,11 +3140,19 @@ def create_app(database_override=None):
                 source_intervals = [connection.get("busy_intervals", [])]
                 names = [connection.get("display_name") or "iCal calendar"]
             for index, intervals in enumerate(source_intervals):
-                name = names[index] if show_names and index < len(names) else "Connected calendar"
+                provider = connection["provider"]
+                fallback = "Google Calendar" if provider == "google" else "iCal calendar"
+                name = (names[index] or fallback).strip() if show_names and index < len(names) else "Connected calendar"
+                name = name or fallback
                 source_name_counts[name] = source_name_counts.get(name, 0) + 1
+                name = f"{name} ({source_name_counts[name]})" if source_name_counts[name] > 1 else name
+                label = f"Google Calendar · {name}" if show_names and provider == "google" and name != "Google Calendar" else name
                 calendar_sources.append({
                     "id": f"{connection['_id']}-{index}",
-                    "name": f"{name} ({source_name_counts[name]})" if source_name_counts[name] > 1 else name,
+                    "name": name,
+                    "provider": provider,
+                    "display_label": label,
+                    "busy_label": f"BUSY ({label})",
                     "color": len(calendar_sources) % 6,
                     "days": {
                         current.isoformat(): [{

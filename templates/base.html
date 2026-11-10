@@ -21,7 +21,7 @@
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="messages" aria-live="polite">{% for category, message in messages %}<p class="message {{ category }}">{{ message }}</p>{% endfor %}</div>{% endif %}{% endwith %}
     {% block content %}{% endblock %}
   </main>
-  <footer class="container"><p class="muted"><a href="{{ url_for('privacy') }}">Privacy Policy</a></p></footer>
+  <footer class="site-footer"><a href="{{ url_for('privacy') }}">Privacy Policy</a></footer>
   {% if current_user.is_authenticated %}{% include 'partials/notification_drawer.html' %}{% endif %}
   <div class="time-picker-popover" data-time-picker-dialog aria-labelledby="time-picker-title" role="dialog" hidden>
       <h2 id="time-picker-title">Choose time</h2>

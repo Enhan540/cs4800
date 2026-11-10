@@ -21,10 +21,18 @@
     <p class="field-help" id="availability-chart-help">Click an empty time to add a weekly window, or select a window to view, edit, or delete it. With a day focused, use arrow keys to choose a time and Enter to add.</p>
   {% endif %}
   <div class="calendar-mask-legend" aria-label="Calendar layers">
-    <span><i class="calendar-legend-swatch calendar-legend-baseline"></i>Recurring</span>
+    <span><i class="calendar-legend-swatch calendar-legend-baseline"></i>Set availability</span>
     <span><i class="calendar-legend-swatch calendar-legend-effective"></i>Actually free</span>
-    {% for source in calendar_sources %}<button type="button" class="calendar-source-filter" data-calendar-filter="{{ source.id }}" aria-pressed="false" title="Show only {{ source.name }} busy mask"><i class="calendar-legend-swatch calendar-color-{{ source.color }}"></i>{{ source.name }}</button>{% endfor %}
   </div>
+  {% if calendar_sources %}
+  <fieldset class="calendar-display-controls">
+    <legend>Calendars to display</legend>
+    <p class="field-help" id="calendar-display-help">Hide or show busy blocks here. Actually free time still accounts for every connected calendar. Change calendars used for scheduling in Account settings.</p>
+    <div class="calendar-checkbox-list">
+      {% for source in calendar_sources %}<label class="calendar-source-option"><input type="checkbox" data-calendar-filter="{{ source.id }}" aria-describedby="calendar-display-help" checked><i class="calendar-legend-swatch calendar-color-{{ source.color }}" aria-hidden="true"></i><span>{{ source.display_label }}</span></label>{% endfor %}
+    </div>
+  </fieldset>
+  {% endif %}
   <p class="field-help" data-availability-status role="status" aria-live="polite"></p>
   <div class="weekly-calendar" role="region" aria-label="Weekly availability overview for {{ user.display_name }}" data-availability-editable="{{ 'true' if can_edit_availability else 'false' }}">
     <div class="calendar-grid">
@@ -38,7 +46,7 @@
       <div class="calendar-day" data-availability-calendar-day="{{ day }}" data-day="{{ day }}" data-date="{{ current_date.isoformat() }}">
         <div class="calendar-day-track" {% if can_edit_availability %}tabindex="0" role="group" aria-label="{{ current_date.strftime('%A, %B') }} {{ current_date.day }}, {{ current_date.year }}. Choose a time to add weekly availability." aria-describedby="availability-chart-help"{% endif %}>
           {% for entry in entries if entry.day == day %}
-            {% set interval_label = current_date.strftime('%A, %B') ~ ' ' ~ current_date.day ~ ', ' ~ (entry.start_time|time12) ~ ' to ' ~ (entry.end_time|time12) %}
+            {% set interval_label = 'Set availability on ' ~ current_date.strftime('%A, %B') ~ ' ' ~ current_date.day ~ ', ' ~ (entry.start_time|time12) ~ ' to ' ~ (entry.end_time|time12) %}
             {% if can_edit_availability %}
             <button class="calendar-window availability-window-block" type="button" title="{{ entry.start_time|time12 }} – {{ entry.end_time|time12 }}" aria-label="{{ interval_label }}. View weekly availability." aria-haspopup="dialog" data-availability-window
             {% else %}
@@ -49,7 +57,11 @@
             {% if can_edit_availability %}</button>{% else %}</span>{% endif %}
           {% endfor %}
           {% for source in calendar_sources %}{% for busy in source.days[current_date.isoformat()] %}
-            <span class="calendar-busy-mask calendar-color-{{ source.color }}" data-calendar-mask data-calendar-source="{{ source.id }}" data-start-minute="{{ busy.start_minutes }}" data-end-minute="{{ busy.end_minutes }}" style="top: {{ (busy.start_minutes / 1440 * 100)|round(3) }}%; height: {{ ((busy.end_minutes - busy.start_minutes) / 1440 * 100)|round(3) }}%;" role="img" tabindex="0" aria-label="{{ source.name }} busy on {{ current_date.strftime('%A, %B') }} {{ current_date.day }} from {{ '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 }} to {{ '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 }}" title="{{ source.name }} busy · {{ '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 }}–{{ '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 }}"></span>
+            {% set busy_start = '%02d:%02d'|format(busy.start_minutes // 60, busy.start_minutes % 60)|time12 %}
+            {% set busy_end = '%02d:%02d'|format(busy.end_minutes // 60, busy.end_minutes % 60)|time12 %}
+            <span class="calendar-busy-mask calendar-color-{{ source.color }}" data-calendar-mask data-calendar-source="{{ source.id }}" data-start-minute="{{ busy.start_minutes }}" data-end-minute="{{ busy.end_minutes }}" style="top: {{ (busy.start_minutes / 1440 * 100)|round(3) }}%; height: {{ ((busy.end_minutes - busy.start_minutes) / 1440 * 100)|round(3) }}%;" role="img" tabindex="0" aria-label="{{ source.name }} busy on {{ current_date.strftime('%A, %B') }} {{ current_date.day }} from {{ busy_start }} to {{ busy_end }}. {{ source.busy_label }}">
+              <span class="calendar-busy-content" aria-hidden="true"><strong>{{ source.busy_label }}</strong><span>{{ busy_start }} – {{ busy_end }}</span></span>
+            </span>
           {% endfor %}{% endfor %}
           {% for start, end in effective_days[loop.index0].windows %}
             {% set start_minute = start.hour * 60 + start.minute %}
