@@ -45,6 +45,13 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def docker_report_user_options():
+    """Keep scanner reports owned by the host runner on POSIX systems."""
+    if os.name == "nt":
+        return []
+    return ["--user", f"{os.getuid()}:{os.getgid()}"]
+
+
 def execute(command, cwd=None, env=None, timeout=600, data=None):
     return subprocess.run(command, cwd=cwd or ROOT, env=env, input=data, capture_output=True, timeout=timeout, check=False)
 
@@ -299,7 +306,7 @@ def collect_locked(args, home):
                     common = common if common.is_absolute() else ROOT / common
                     git_options = ["-v", f"{common.resolve()}:/git-data:ro", "-e", "GIT_DIR=/git-data", "-e", "GIT_WORK_TREE=/scan", "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=/scan"]
                 report_path = directory / (label + ".json")
-                result = run(label, ["docker", "run", "--rm", "--network=none", "-v", f"{mount}:/scan:ro", "-v", f"{tree / '.security'}:/policy:ro", "-v", f"{directory}:/reports", *git_options, IMAGES["gitleaks"], *command, "--config=/policy/gitleaks.toml", "--redact=100", "--ignore-gitleaks-allow", "--exit-code=42", "--report-format=json", f"--report-path=/reports/{label}.json", "--no-banner"], cwd=tree, expected=(0, 42))
+                result = run(label, ["docker", "run", "--rm", "--network=none", *docker_report_user_options(), "-v", f"{mount}:/scan:ro", "-v", f"{tree / '.security'}:/policy:ro", "-v", f"{directory}:/reports", *git_options, IMAGES["gitleaks"], *command, "--config=/policy/gitleaks.toml", "--redact=100", "--ignore-gitleaks-allow", "--exit-code=42", "--report-format=json", f"--report-path=/reports/{label}.json", "--no-banner"], cwd=tree, expected=(0, 42))
                 if result and result.returncode in (0, 42):
                     try:
                         report = parse_secret_report(result.returncode, report_path.read_bytes() if report_path.exists() else b"")
