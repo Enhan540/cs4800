@@ -9,6 +9,6 @@
   <div class="sidebar-group-heading"><span>Quick groups</span><small>{{ sidebar_groups|length }} active</small></div>
   <div class="sidebar-groups">{% for group in sidebar_groups %}<a class="sidebar-group" href="{{ url_for('group_detail', group_id=group._id) }}"><span class="sidebar-group-dot" aria-hidden="true"></span><span>{{ group.name }}</span><small>{{ group.member_ids|length }}</small></a>{% endfor %}</div>
   <a class="sidebar-new-group" href="{{ url_for('create_group') }}">+ New Group</a>
-  <div class="sidebar-footer"><a class="sidebar-profile" href="{{ url_for('account') }}"><span class="account-avatar">{{ current_user.username[:2]|upper }}</span><span><strong>{{ current_user.username }}</strong><small>Account settings</small></span><span aria-hidden="true">⚙</span></a><form method="post" action="{{ url_for('logout') }}"><button class="sidebar-logout" type="submit">Log Out</button></form></div>
+  <div class="sidebar-footer"><a class="sidebar-profile" href="{{ url_for('account') }}"><span class="account-avatar">{{ current_user.username[:2]|upper }}</span><span><strong>{{ current_user.username }}</strong><small>Account settings</small></span><span aria-hidden="true">⚙</span></a><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="sidebar-logout" type="submit">Log Out</button></form></div>
 </aside>
 <button class="sidebar-backdrop" type="button" data-sidebar-close aria-label="Close navigation"></button>

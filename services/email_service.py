@@ -15,7 +15,7 @@ def _base_url(app):
     return ""
 
 
-def send_email(app, *, recipient, subject, text):
+def send_email(app, *, recipient, subject, text, idempotency_key=None):
     mode = (app.config.get("EMAIL_DELIVERY_MODE") or os.getenv("EMAIL_DELIVERY_MODE", "console")).casefold()
     if mode == "console":
         app.logger.info("Development email subject=%s recipient=%s body=%s", subject, recipient, text)
@@ -28,9 +28,12 @@ def send_email(app, *, recipient, subject, text):
     if not api_key or not from_email:
         app.logger.error("Email provider is not configured")
         return False
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     response = requests.post(
         "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers=headers,
         json={"from": from_email, "to": [recipient], "subject": subject, "text": text},
         timeout=(3.05, 15),
     )
@@ -38,6 +41,10 @@ def send_email(app, *, recipient, subject, text):
         app.logger.error("Email provider request failed with status=%s", response.status_code)
         return False
     return True
+
+
+def send_security_change_email(app, *, recipient, message, changed_at, idempotency_key):
+    return send_email(app, recipient=recipient, subject="Group Planner security update", text=f"{message}.\n\nTime: {changed_at}\n\nIf you did not make this change, open Group Planner using your usual address and review your account.\n\n{_base_url(app)}/account\n\nThis message contains no password, verification code, or sign-in link.", idempotency_key=idempotency_key)
 
 
 def send_verification_email(app, *, recipient, token):

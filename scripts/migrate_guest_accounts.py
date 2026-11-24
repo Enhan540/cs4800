@@ -5,20 +5,23 @@ Flask application during startup.
 """
 
 import argparse
+import getpass
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 from werkzeug.security import generate_password_hash
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from services.password_policy import password_error
 
 GUEST_PATTERN = re.compile(r"^guest[1-9]\d*$", re.IGNORECASE)
 MIGRATION_SOURCE = "legacy_guest"
-TEMPORARY_PASSWORD = "guestpassword"
 
 
 def utc_now():
@@ -34,8 +37,36 @@ def legacy_guests(database):
     return sorted(guests, key=lambda item: item["display_name"].casefold())
 
 
-def migrate_guest_accounts(database, *, dry_run=False, output=print):
+def migration_account(database, member):
+    account = database.accounts.find_one({"_id": member["linked_account_id"]}) if member.get("linked_account_id") else None
+    account = account or database.accounts.find_one({"legacy_member_id": member["_id"], "migration_source": MIGRATION_SOURCE})
+    if account:
+        return account, False
+    owner = database.accounts.find_one({"normalized_username": member["display_name"].strip().casefold()})
+    conflict = bool(owner and (owner.get("legacy_member_id") != member["_id"] or owner.get("migration_source") != MIGRATION_SOURCE))
+    return owner, conflict
+
+
+def migrate_guest_accounts(database, *, dry_run=False, output=print, password_provider=None):
     guests = legacy_guests(database)
+    # Collect and validate every new account's credential before any writes.
+    # Existing accounts are never reset or assigned a replacement password.
+    password_hashes, used_passwords = {}, set()
+    if not dry_run:
+        for member in guests:
+            account, conflict = migration_account(database, member)
+            if account or conflict:
+                continue
+            if password_provider is None:
+                raise ValueError("New accounts require individually supplied temporary passwords")
+            username = member["display_name"].strip()
+            password = password_provider(username)
+            error = password_error(password, username=username) if isinstance(password, str) else "A password is required."
+            if error or password.casefold() in used_passwords:
+                raise ValueError("Each new account requires a distinct password that passes the password policy")
+            used_passwords.add(password.casefold())
+            password_hashes[username.casefold()] = generate_password_hash(password)
+        used_passwords.clear()
     legacy_groups = list(
         database.groups.find(
             {
@@ -65,24 +96,11 @@ def migrate_guest_accounts(database, *, dry_run=False, output=print):
     for member in guests:
         username = member["display_name"].strip()
         normalized_username = username.casefold()
-        linked_account = None
-        if member.get("linked_account_id"):
-            linked_account = database.accounts.find_one({"_id": member["linked_account_id"]})
-        account = linked_account or database.accounts.find_one(
-            {"legacy_member_id": member["_id"], "migration_source": MIGRATION_SOURCE}
-        )
-        if not account:
-            username_owner = database.accounts.find_one(
-                {"normalized_username": normalized_username}
-            )
-            if username_owner and (
-                username_owner.get("legacy_member_id") != member["_id"]
-                or username_owner.get("migration_source") != MIGRATION_SOURCE
-            ):
-                report["conflicts"].append(username)
-                output(f"Skipped conflicting username: {username}")
-                continue
-            account = username_owner
+        account, conflict = migration_account(database, member)
+        if conflict:
+            report["conflicts"].append(username)
+            output(f"Skipped conflicting username: {username}")
+            continue
 
         if not account:
             report["created_accounts"] += 1
@@ -92,9 +110,10 @@ def migrate_guest_accounts(database, *, dry_run=False, output=print):
                 document = {
                     "username": username,
                     "normalized_username": normalized_username,
-                    "password_hash": generate_password_hash(TEMPORARY_PASSWORD),
+                    "password_hash": password_hashes[normalized_username],
                     "auth_methods": ["password"],
                     "must_change_password": True,
+                    "temporary_password_expires_at": now + timedelta(hours=24),
                     "migration_source": MIGRATION_SOURCE,
                     "legacy_member_id": member["_id"],
                     "created_at": now,
@@ -207,7 +226,17 @@ def main(argv=None):
     try:
         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
         client.admin.command("ping")
-        migrate_guest_accounts(client[database_name], dry_run=args.dry_run)
+        def prompt_password(username):
+            if not sys.stdin.isatty() or not sys.stderr.isatty():
+                raise ValueError("Use an interactive terminal for hidden password entry")
+            password = getpass.getpass(f"Temporary password for {username}: ")
+            if password != getpass.getpass("Confirm temporary password: "):
+                raise ValueError("Temporary passwords did not match")
+            return password
+        migrate_guest_accounts(client[database_name], dry_run=args.dry_run, password_provider=prompt_password)
+    except ValueError as exc:
+        print(f"Migration stopped before creating new accounts: {exc}", file=sys.stderr)
+        return 1
     except PyMongoError as exc:
         print(
             f"Migration could not connect to or update MongoDB ({type(exc).__name__}).",

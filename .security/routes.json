@@ -1,0 +1,665 @@
+[
+  {
+    "endpoint": "accept_group_invitation",
+    "path": "/invitations/<invitation_id>/accept",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "account",
+    "path": "/account",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "account_availability",
+    "path": "/account/availability",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "add_group_member",
+    "path": "/groups/<group_id>/members",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "api_notification_summary",
+    "path": "/api/notifications/summary",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "api_notifications",
+    "path": "/api/notifications",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "bulk_edit_availability",
+    "path": "/users/<user_id>/availability/bulk-edit",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "change_password",
+    "path": "/account/password",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "change_username",
+    "path": "/account/username",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "complete_username",
+    "path": "/account/complete-username",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "connect_ical_calendar",
+    "path": "/account/calendars/ical",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "create_group",
+    "path": "/groups/create",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "create_plan",
+    "path": "/groups/<group_id>/plans/create",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "dashboard",
+    "path": "/dashboard",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "decline_group_invitation",
+    "path": "/invitations/<invitation_id>/decline",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "delete_availability",
+    "path": "/availability/<availability_id>/delete",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "delete_group",
+    "path": "/groups/<group_id>/delete",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "delete_notification",
+    "path": "/api/notifications/<notification_id>",
+    "methods": [
+      "DELETE"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "delete_plan",
+    "path": "/plans/<plan_id>/delete",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "delete_selected_notifications",
+    "path": "/api/notifications/delete",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "disconnect_calendar",
+    "path": "/account/calendars/<connection_id>/disconnect",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "disconnect_google_identity",
+    "path": "/account/google/disconnect",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "edit_availability",
+    "path": "/availability/<availability_id>/edit",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "edit_group",
+    "path": "/groups/<group_id>/edit",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "edit_plan",
+    "path": "/plans/<plan_id>/edit",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "find_plan_times",
+    "path": "/plans/<plan_id>/find-times",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "forgot_password",
+    "path": "/forgot-password",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "google_auth",
+    "path": "/auth/google",
+    "methods": [
+      "GET"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "google_calendar_auth",
+    "path": "/auth/google-calendar",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "google_calendar_callback",
+    "path": "/auth/google-calendar/callback",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "google_calendar_selection",
+    "path": "/account/calendars/google/selection",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "google_callback",
+    "path": "/auth/google/callback",
+    "methods": [
+      "GET"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "google_connect",
+    "path": "/auth/google/connect",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "group_detail",
+    "path": "/groups/<group_id>",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "groups",
+    "path": "/groups",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "index",
+    "path": "/",
+    "methods": [
+      "GET"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "invite_group_account",
+    "path": "/groups/<group_id>/invitations",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "invite_plan_member",
+    "path": "/plans/<plan_id>/invite",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "login",
+    "path": "/login",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "logout",
+    "path": "/logout",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mark_notifications_read",
+    "path": "/notifications/read",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mark_selected_notifications_read",
+    "path": "/api/notifications/mark-read",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "member_availability",
+    "path": "/users/<user_id>/availability",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "members",
+    "path": "/members",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mfa_cancel",
+    "path": "/auth/mfa/cancel",
+    "methods": [
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "mfa_challenge",
+    "path": "/auth/mfa",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "mfa_disable",
+    "path": "/account/mfa/disable",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mfa_enable",
+    "path": "/account/mfa/enable",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mfa_regenerate_recovery",
+    "path": "/account/mfa/recovery",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mfa_settings",
+    "path": "/account/mfa",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mfa_setup",
+    "path": "/account/mfa/setup",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "mfa_setup_qr",
+    "path": "/account/mfa/setup/qr",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "notification_rsvp",
+    "path": "/notifications/<notification_id>/rsvp",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "plan_detail",
+    "path": "/plans/<plan_id>",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "privacy",
+    "path": "/privacy",
+    "methods": [
+      "GET"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "register",
+    "path": "/register",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "remove_group_member",
+    "path": "/groups/<group_id>/members/<user_id>/remove",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "resend_verification_email",
+    "path": "/account/email/resend",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "reset_password",
+    "path": "/reset-password/<token>",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "results",
+    "path": "/results",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "retract_group_invitation",
+    "path": "/groups/<group_id>/invitations/<invitation_id>/retract",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "schedule_plan",
+    "path": "/plans/<plan_id>/schedule",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "schedule_preview",
+    "path": "/groups/<group_id>/schedule-preview",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "search_group_invitation_accounts",
+    "path": "/groups/<group_id>/invitations/search",
+    "methods": [
+      "GET"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "set_password",
+    "path": "/account/password/set",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "submit",
+    "path": "/submit",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "sync_calendar",
+    "path": "/account/calendars/<connection_id>/sync",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "update_account_email",
+    "path": "/account/email",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "update_group_member_role",
+    "path": "/groups/<group_id>/members/<user_id>/role",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "update_rsvp",
+    "path": "/plans/<plan_id>/rsvp",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "users",
+    "path": "/users",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "verify_email",
+    "path": "/verify-email/<token>",
+    "methods": [
+      "GET"
+    ],
+    "access": "public",
+    "login_guard": false
+  }
+]

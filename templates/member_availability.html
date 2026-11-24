@@ -82,7 +82,7 @@
     <p class="availability-preview-time" data-availability-time></p>
     <div class="dialog-actions"><button class="button secondary" type="button" data-availability-delete>Delete</button><button class="button" type="button" data-availability-edit>Edit</button></div>
   </div>
-  <form method="post" data-availability-window-form hidden>
+  <form method="post" data-availability-window-form hidden><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="day"><input type="hidden" name="return_to" value="{{ return_to }}">
     <div class="availability-time-fields">
       <label class="unified-time-input"><span>Start time</span><span class="unified-time-control"><input name="start_time" type="text" inputmode="text" autocomplete="off" required data-unified-time></span></label>

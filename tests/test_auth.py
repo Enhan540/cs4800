@@ -14,7 +14,7 @@ def auth_app_and_db():
     database = mongomock.MongoClient().auth_test
     app = create_app(database_override=database)
     app.config.update(
-        TESTING=True,
+        TESTING=True, CSRF_ENABLED=False,
         SECRET_KEY="auth-test-secret",
         LOGIN_DISABLED=False,
         GOOGLE_CLIENT_ID="",

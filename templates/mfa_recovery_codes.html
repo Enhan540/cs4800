@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block external_fonts %}{% endblock %}
+{% block title %}Save recovery codes | Group Planner{% endblock %}
+{% block content %}
+<section class="narrow-page account-page"><div class="card account-section"><p class="eyebrow">Keep these safe</p><h1>Save your recovery codes</h1><p>Each code works once if you cannot use your authenticator. Save these codes now; they will not be shown again.</p><div class="mfa-recovery-list">{% for code in codes %}<code data-mfa-recovery>{{ code }}</code>{% endfor %}</div><a class="button" href="{{ url_for('mfa_settings') }}">I have saved my codes</a></div></section>
+{% endblock %}

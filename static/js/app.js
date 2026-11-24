@@ -116,6 +116,7 @@ document.addEventListener("DOMContentLoaded", () => {
             form.append(input, button); actions.appendChild(form);
           });
         }
+        if (item.type === "SECURITY_CHANGE") { title.textContent = "Security update"; text.textContent = item.message; card.append(title, text); }
         if (item.type === "GROUP_INVITE") card.append(title, text);
         card.appendChild(actions); list.appendChild(card);
       });
@@ -185,6 +186,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const remove = document.createElement("button"); remove.type = "button"; remove.className = "icon-button notification-delete"; remove.setAttribute("aria-label", "Delete notification"); remove.textContent = "×"; remove.addEventListener("click", async (event) => { event.stopPropagation(); if (!window.confirm("Delete this notification?")) return; const response = await fetch(`/api/notifications/${item.id}`, { method: "DELETE", headers: { "X-Requested-With": "fetch" } }); if (response.ok) { selected.delete(item.id); await refreshDrawer(); } });
         if (item.type === "GROUP_INVITE") { const titleRow = document.createElement("div"); titleRow.className = "notification-title-row"; const icon = document.createElement("span"); icon.className = "notification-group-icon"; icon.textContent = initials(item.group_name); const title = document.createElement("b"); title.textContent = item.group_name; const time = document.createElement("time"); time.className = "notification-time"; time.dateTime = item.created_at; time.textContent = relativeTime(item.created_at); const unread = document.createElement("span"); unread.className = "notification-unread-indicator"; unread.hidden = item.read; unread.textContent = "●"; titleRow.append(icon, title, unread, time); const text = document.createElement("p"); text.textContent = `${item.actor_name} invited you to join this group.`; body.append(titleRow, text); const actions = document.createElement("div"); actions.className = "notification-actions"; if (item.invite_status === "pending") actions.append(postAction(`/invitations/${item.invite_id}/decline`, item.id, "Decline"), postAction(`/invitations/${item.invite_id}/accept`, item.id, "Join Group")); else { const stale = document.createElement("small"); stale.className = "notification-stale"; stale.textContent = "Invitation no longer available"; actions.append(stale); } body.appendChild(actions); }
         if (item.type === "PLAN_SCHEDULED") { const link = document.createElement("a"); link.className = "notification-link"; link.href = `/plans/${item.plan_id}`; const title = document.createElement("b"); title.textContent = item.plan_title; const text = document.createElement("p"); text.textContent = "The plan has been scheduled."; const time = document.createElement("small"); time.textContent = `${item.scheduled_start.replace("T", " ")} – ${item.scheduled_end.replace("T", " ")}`; link.append(title, text, time); body.appendChild(link); const actions = document.createElement("div"); actions.className = "notification-actions"; actions.append(postAction(`/notifications/${item.id}/rsvp`, item.id, "Not Going"), postAction(`/notifications/${item.id}/rsvp`, item.id, "Attending")); actions.querySelectorAll("form").forEach((form, index) => { const input = document.createElement("input"); input.type = "hidden"; input.name = "status"; input.value = index === 0 ? "not_attending" : "attending"; form.prepend(input); }); body.appendChild(actions); }
+        if (item.type === "SECURITY_CHANGE") { const title = document.createElement("b"); title.textContent = "Security update"; const text = document.createElement("p"); text.textContent = item.message; body.append(title, text); }
         card.append(check, body, remove); card.querySelectorAll("form[data-notification-action]").forEach((form) => form.addEventListener("submit", async (event) => { event.preventDefault(); const buttons = card.querySelectorAll("button"); buttons.forEach((button) => { button.disabled = true; }); const active = form.querySelector("button"); if (active) active.textContent = active.textContent === "Join Group" ? "Joining…" : active.textContent === "Decline" ? "Declining…" : "Saving…"; try { const response = await fetch(form.action, { method: "POST", headers: { "X-Requested-With": "fetch", Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(new FormData(form)) }); const payload = await response.json(); if (!response.ok || !payload.ok) throw new Error(payload.error || "Action could not be completed."); selected.delete(item.id); await refreshDrawer(); } catch (error) { let message = card.querySelector(".notification-inline-error"); if (!message) { message = document.createElement("small"); message.className = "notification-inline-error"; body.appendChild(message); } message.textContent = error.message; buttons.forEach((button) => { button.disabled = false; }); if (active) active.textContent = active.textContent.includes("Joining") ? "Join Group" : active.textContent.includes("Declining") ? "Decline" : "Save"; } })); list.appendChild(card);
       });
       updateSelection();
@@ -230,6 +232,7 @@ document.addEventListener("DOMContentLoaded", () => {
           [["Not Going", "secondary", "not_attending"], ["Attending", "", "attending"]].forEach(([label, style, status]) => { const form = document.createElement("form"); form.method = "post"; form.action = `/notifications/${item.id}/rsvp`; const input = document.createElement("input"); input.type = "hidden"; input.name = "status"; input.value = status; const button = document.createElement("button"); button.className = `button ${style}`.trim(); button.type = "submit"; button.textContent = label; form.append(input, button); actions.appendChild(form); });
           card.appendChild(actions);
         }
+        if (item.type === "SECURITY_CHANGE") { const title = document.createElement("strong"); title.textContent = "Security update"; const text = document.createElement("p"); text.textContent = item.message; card.append(title, text); }
         list.appendChild(card);
       });
     };
@@ -314,20 +317,41 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.querySelectorAll("input[data-invite-search]").forEach((input) => {
     const results = input.closest("form")?.querySelector("[data-invite-results]");
+    const showMessage = (text) => {
+      const message = document.createElement("p");
+      message.className = "muted small";
+      message.textContent = text;
+      results.replaceChildren(message);
+    };
     let timer = null;
     input.addEventListener("input", () => {
       window.clearTimeout(timer);
       const query = input.value.trim();
-      if (query.length < 2) { results.innerHTML = ""; return; }
+      if (query.length < 2) { results.replaceChildren(); return; }
       timer = window.setTimeout(async () => {
         try {
           const response = await fetch(`${input.dataset.inviteSearch}?q=${encodeURIComponent(query)}`, { headers: { Accept: "application/json" } });
           const payload = await response.json();
-          results.innerHTML = payload.results.length ? payload.results.map((item) => {
+          const rows = payload.results.map((item) => {
+            const row = document.createElement("div");
+            row.className = "invite-search-result";
+            const username = document.createElement("span");
+            username.textContent = item.username;
             const label = item.state === "member" ? "Member ✓" : item.state === "pending" ? "Invited ✓" : "Invite";
-            const action = item.state === "available" ? `<button type="button" data-invite-id="${item.id}" data-invite-username="${item.username}">${label}</button>` : `<span class="muted small">${label}</span>`;
-            return `<div class="invite-search-result"><span>${item.username}</span>${action}</div>`;
-          }).join("") : '<p class="muted small">No matching accounts.</p>';
+            const action = document.createElement(item.state === "available" ? "button" : "span");
+            action.textContent = label;
+            if (item.state === "available") {
+              action.type = "button";
+              action.dataset.inviteId = item.id;
+              action.dataset.inviteUsername = item.username;
+            } else {
+              action.className = "muted small";
+            }
+            row.append(username, action);
+            return row;
+          });
+          if (rows.length) results.replaceChildren(...rows);
+          else showMessage("No matching accounts.");
           results.querySelectorAll("[data-invite-username]").forEach((button) => button.addEventListener("click", () => {
             button.disabled = true;
             button.textContent = "Inviting…";
@@ -336,7 +360,7 @@ document.addEventListener("DOMContentLoaded", () => {
               .catch((error) => { button.disabled = false; button.textContent = "Retry / Invite"; const message = document.createElement("small"); message.className = "invite-error"; message.textContent = error.message; button.closest(".invite-search-result")?.appendChild(message); });
           }));
         } catch (_error) {
-          results.innerHTML = '<p class="muted small">Search is temporarily unavailable.</p>';
+          showMessage("Search is temporarily unavailable.");
         }
       }, 220);
     });
