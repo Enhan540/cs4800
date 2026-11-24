@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% from "partials/mfa_fields.html" import verification_code, password_confirmation %}
+{% block external_fonts %}{% endblock %}
+{% block title %}Authenticator verification | Group Planner{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('account') }}">← Back to Account</a>
+<section class="narrow-page account-page"><p class="eyebrow">Sign-in security</p><h1>Authenticator verification</h1><p>Add an optional verification step to password and Google sign-in.</p>
+{% if account.enabled %}
+<section class="card account-section"><h2>Verification is on</h2><p>Your authenticator app or a saved recovery code is required when signing in.</p><p>{{ account.remaining_codes }} recovery codes remain.</p></section>
+<section class="card account-section"><h2>Replace recovery codes</h2><p>Your previous recovery codes will stop working. Save the new codes when they appear.</p><form method="post" action="{{ url_for('mfa_regenerate_recovery') }}" class="auth-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{{ password_confirmation(account.has_password) }}{{ verification_code() }}<button class="button" type="submit">Create new recovery codes</button></form></section>
+<section class="card account-section"><h2>Turn off verification</h2><form method="post" action="{{ url_for('mfa_disable') }}" class="auth-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{{ password_confirmation(account.has_password) }}{{ verification_code() }}<button class="button danger" type="submit">Turn off verification</button></form></section>
+{% else %}
+<section class="card account-section"><h2>Verification is off</h2><p>Use an authenticator app that supports time-based codes. You will also receive ten recovery codes to save somewhere safe.</p><form method="post" action="{{ url_for('mfa_setup') }}" class="auth-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{{ password_confirmation(account.has_password) }}<button class="button" type="submit">Set up an authenticator</button></form></section>
+{% endif %}</section>
+{% endblock %}

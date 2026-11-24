@@ -5,4 +5,17 @@ __pycache__/
 *.py[cod]
 *.log
 .pytest_cache/
+security-risk-register*.json
+security-report*
+playwright-report/
+test-results/
+.security-private/
+asvs-evidence.json
+asvs-checklist.json
+coverage-summary.json
+route-permission-matrix.json
+audit-report.json
+audit-report.html
+resume-checkpoint.json
+RESUME_CHECKPOINT.txt
 .DS_Store

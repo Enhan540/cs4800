@@ -3,7 +3,7 @@
 {% block content %}
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
 <section class="plan-builder-page with-back-link"><div class="plan-builder-heading"><p class="eyebrow">{{ group.name }}</p><h1>Create a plan</h1><p class="muted">Set the requirements and preview times that work for the group.</p></div>
-  <section class="card plan-builder-card"><form method="post" id="plan-form" class="plan-builder-form" data-schedule-preview-url="{{ url_for('schedule_preview', group_id=group._id) }}">
+  <section class="card plan-builder-card"><form method="post" id="plan-form" class="plan-builder-form" data-schedule-preview-url="{{ url_for('schedule_preview', group_id=group._id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="plan-form-fields">
     <label for="title">Plan title<input id="title" name="title" required maxlength="120" placeholder="Movie Night" value="{{ form.get('title', '') if form else '' }}"></label>
     <div class="form-grid"><label for="start_date">Start date<input id="start_date" name="start_date" type="date" required value="{{ form.get('start_date', '') if form else '' }}"></label><label for="end_date">End date<input id="end_date" name="end_date" type="date" required value="{{ form.get('end_date', '') if form else '' }}"></label></div>

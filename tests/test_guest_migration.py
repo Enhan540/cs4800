@@ -12,6 +12,11 @@ from scripts.migrate_guest_accounts import migrate_guest_accounts
 
 
 @pytest.fixture
+def temporary_passwords():
+    return {name: os.urandom(24).hex() for name in ("guest1", "guest2", "guest3")}
+
+
+@pytest.fixture
 def migrated_database():
     database = mongomock.MongoClient().guest_migration_test
     guest_ids = {}
@@ -67,13 +72,13 @@ def migrated_database():
     return database, guest_ids, unrelated_id, first_group_id, second_group_id, availability_id, plan_id
 
 
-def test_migration_creates_linked_accounts_and_preserves_legacy_data(migrated_database):
+def test_migration_creates_linked_accounts_and_preserves_legacy_data(migrated_database, temporary_passwords):
     database, guest_ids, unrelated_id, first_group_id, second_group_id, availability_id, plan_id = (
         migrated_database
     )
     plan_before = deepcopy(database.plans.find_one({"_id": plan_id}))
 
-    report = migrate_guest_accounts(database, output=lambda _message: None)
+    report = migrate_guest_accounts(database, output=lambda _message: None, password_provider=temporary_passwords.__getitem__)
 
     assert report["found_guests"] == 3
     assert report["created_accounts"] == 3
@@ -82,7 +87,7 @@ def test_migration_creates_linked_accounts_and_preserves_legacy_data(migrated_da
         account = database.accounts.find_one({"normalized_username": username})
         member = database.users.find_one({"_id": member_id})
         assert account["username"] == username
-        assert check_password_hash(account["password_hash"], "guestpassword")
+        assert check_password_hash(account["password_hash"], temporary_passwords[username])
         assert account["must_change_password"] is True
         assert "password" not in account
         assert "plaintext_password" not in account
@@ -104,14 +109,14 @@ def test_migration_creates_linked_accounts_and_preserves_legacy_data(migrated_da
     assert guest2["_id"] in database.groups.find_one({"_id": second_group_id})["account_ids"]
 
 
-def test_migration_is_idempotent_and_dry_run_does_not_write(migrated_database):
+def test_migration_is_idempotent_and_dry_run_does_not_write(migrated_database, temporary_passwords):
     database, *_rest = migrated_database
     dry_report = migrate_guest_accounts(database, dry_run=True, output=lambda _message: None)
     assert dry_report["created_accounts"] == 3
     assert database.accounts.count_documents({}) == 0
     assert database.users.count_documents({"linked_account_id": {"$exists": True}}) == 0
 
-    migrate_guest_accounts(database, output=lambda _message: None)
+    migrate_guest_accounts(database, output=lambda _message: None, password_provider=temporary_passwords.__getitem__)
     counts_after_first = {
         "accounts": database.accounts.count_documents({}),
         "users": database.users.count_documents({}),
@@ -135,16 +140,18 @@ def test_migration_is_idempotent_and_dry_run_does_not_write(migrated_database):
     assert groups_after_first == list(database.groups.find({}))
 
 
-def test_guest_owner_permissions_and_regular_member_restrictions(migrated_database):
+def test_guest_owner_permissions_and_regular_member_restrictions(migrated_database, temporary_passwords):
     database, guest_ids, _unrelated_id, first_group_id, second_group_id, *_rest = migrated_database
-    migrate_guest_accounts(database, output=lambda _message: None)
+    migrate_guest_accounts(database, output=lambda _message: None, password_provider=temporary_passwords.__getitem__)
     app = create_app(database_override=database)
-    app.config.update(TESTING=True, SECRET_KEY="migration-test", LOGIN_DISABLED=False)
+    app.config.update(TESTING=True, CSRF_ENABLED=False, SECRET_KEY="migration-test", LOGIN_DISABLED=False)
     client = app.test_client()
 
     assert client.post(
-        "/login", data={"username": "guest2", "password": "guestpassword"}
+        "/login", data={"username": "guest2", "password": temporary_passwords["guest2"]}
     ).status_code == 302
+    replacement = os.urandom(24).hex()
+    client.post("/account/password", data={"current_password": temporary_passwords["guest2"], "new_password": replacement, "confirm_password": replacement})
     assert b"Friday Friends" in client.get("/groups").data
     assert b"D&amp;D Group" in client.get("/groups").data
     assert client.get(f"/groups/{first_group_id}/edit").status_code == 403
@@ -156,8 +163,10 @@ def test_guest_owner_permissions_and_regular_member_restrictions(migrated_databa
     client.post("/logout")
 
     assert client.post(
-        "/login", data={"username": "guest1", "password": "guestpassword"}
+        "/login", data={"username": "guest1", "password": temporary_passwords["guest1"]}
     ).status_code == 302
+    replacement = os.urandom(24).hex()
+    client.post("/account/password", data={"current_password": temporary_passwords["guest1"], "new_password": replacement, "confirm_password": replacement})
     assert client.post(
         f"/groups/{first_group_id}/edit",
         data={"name": "Friday Friends Updated", "description": ""},
@@ -179,7 +188,7 @@ def test_guest_owner_permissions_and_regular_member_restrictions(migrated_databa
 def test_new_group_includes_creator_as_owner_and_member():
     database = mongomock.MongoClient().new_group_owner_test
     app = create_app(database_override=database)
-    app.config.update(TESTING=True, SECRET_KEY="new-owner-test", LOGIN_DISABLED=False)
+    app.config.update(TESTING=True, CSRF_ENABLED=False, SECRET_KEY="new-owner-test", LOGIN_DISABLED=False)
     client = app.test_client()
     client.post(
         "/register",

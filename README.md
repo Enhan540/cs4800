@@ -1,5 +1,79 @@
 # Group Planner
 
+## Required security checks
+
+Activate the project virtual environment, install `requirements-security.txt`, run
+`python -m playwright install chromium`, and start Docker. Install the local hooks
+with `python scripts/security_install_hooks.py`. The hooks use the installing
+Python interpreter, including from Git interfaces. Security tests keep
+authentication and CSRF enabled; older functional fixtures explicitly disable
+only the protections they do not exercise.
+
+During development run `python scripts/security_check.py audit --worktree`.
+Commit hooks check the staged snapshot; push and CI gates check the committed
+snapshot. Missing scanners, failed tests, and incomplete scans fail the gate.
+High/Critical candidates, credential exposure, account takeover, and unauthorized
+cross-user access block progression. Other findings appear before commits/pushes.
+The private register and reports live outside Git and sync folders at
+`%LOCALAPPDATA%/GroupPlanner/Security/`. Never attach these reports to public issues,
+pull requests, or workflow artifacts. Generate the private ASVS worksheet and route
+matrix with `python scripts/security_report.py`.
+Manual observations are read from the private `asvs-evidence.json` file and are
+bound to the reviewed branch commits. Missing or stale evidence stays unverified.
+
+The Security workflow runs on all pushes, pull requests to both active branches,
+daily advisory checks, and a weekly full scan. Administrators must apply and verify
+`.security/branch-protection.json` on both branches; `security_admin.py --apply`
+uses an administrator `GITHUB_TOKEN`. Required check: `security (current)`.
+The check must come from the official GitHub Actions app, and the latest push
+requires a fresh approval. The helper reads settings back before reporting
+success. `--apply` protects unprotected branches; existing rules are preserved
+and missing safeguards are reported for an administrator to strengthen.
+
+The private checklist generator verifies the reviewed ASVS 5.0.0 CSV checksum
+before writing reports. Updating the standard requires an explicit source review
+and checksum update; redirects or changed content do not overwrite evidence.
+
+The checked production workflow requires a production environment containing
+`VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`, plus a `PRODUCTION_URL`
+environment variable in GitHub's **Variables** settings. It deploys only the exact
+main commit whose Security workflow succeeded. Git-triggered main deployments are
+disabled in `vercel.json`; configure the release credentials before merging this
+configuration. Preview deployments must use separate credentials and databases.
+
+The release job uses `scripts/security_release.py` and the official HTTPS API.
+It verifies the configured project owner, connected GitHub repository, `main`
+production branch, checked commit, and assigned production hostname. It uses the
+pinned HTTP dependencies in `requirements-release.txt`; all root Python dependency
+manifests are included in security scans. It does not install a deployment CLI.
+Verify this flow first with an isolated Vercel project and its test hostname.
+Project Git integration, permissions, and actual release behavior remain unverified
+until that hosted check is completed.
+
+Production also requires a random signing key of at least 32 characters, verified
+MongoDB TLS, HTTPS base/callback URLs on the same hostname, secure session cookies,
+and Resend delivery. Hosted settings, real Google consent, and HTTP/2 edge protection
+remain unverified until checked in the provider consoles. Never run active scanners
+or resource-exhaustion tests against production.
+
+Set a stable local `SECRET_KEY` when keeping calendar connections between restarts.
+An unconfigured development instance generates a new random key on each start.
+The same stable key protects enrolled authenticator seeds; back it up securely and
+plan recovery before rotating it. Recovery codes remain usable if seed decryption
+is unavailable.
+
+Users can enable optional authenticator verification from **Account**. Once on,
+both password and Google sign-in require an authenticator code or one of ten
+single-use recovery codes. Save the recovery codes when shown; they cannot be
+retrieved later. Password resets preserve this protection. Turning verification
+off or replacing recovery codes requires existing identity proofs. Optional
+enrollment leaves any assurance requirement for mandatory MFA unresolved.
+
+Sign-in setting changes create generic in-app alerts and email the previously
+verified contact. Configure the separate trusted retry job as described in
+`.security/policy.md`; it stays disabled until its environment and restricted
+credentials are ready. Hosted delivery and retry activation need direct testing.
+
 Group Planner is the CS4800 Software Engineering with AI MVP for coordinating recurring availability across small groups. Members save weekly availability, groups compare those windows, and plans can find and schedule matching meeting times.
 
 Live application: **replace this text with the deployed Vercel URL** (for example, `https://your-project.vercel.app`). The production URL is intentionally not guessed or committed as a secret.
@@ -68,8 +142,8 @@ These are intentionally outside the current MVP:
 - Jinja2 templates with HTML, CSS, and vanilla JavaScript.
 - MongoDB Atlas with PyMongo.
 - `mongomock` and `pytest` for isolated tests.
-- Vercel for the current hosted application, configured through the Vercel project/Git integration.
-- GitHub Actions for test automation on `main` and pull requests.
+- Vercel for the hosted application, with production releases gated by GitHub Actions after environment setup.
+- GitHub Actions for security checks on every push and pull requests to both active branches.
 - Gunicorn and AWS EC2 support are retained for a later/manual deployment path; EC2 is not the current automatic production deployment.
 
 ## Architecture
@@ -136,7 +210,8 @@ tests/
   test_routes.py
   test_scheduling_service.py
   test_calendar_service.py
-.github/workflows/deploy.yml
+.github/workflows/security.yml
+.github/workflows/release.yml
 .env.example
 requirements.txt
 requirements-dev.txt
@@ -248,7 +323,7 @@ Then run the controlled migration once:
 python scripts/migrate_guest_accounts.py
 ```
 
-The command is idempotent and can safely resume after a completed run. It reports usernames and record counts but never prints passwords, hashes, connection strings, or OAuth credentials. Migrated accounts have `must_change_password: true`; ordinary password and Google accounts have it set to false.
+The command is idempotent and can safely resume after a completed run. Before any writes, it asks for a distinct temporary password for each new account using hidden terminal prompts. Every password must pass the password policy. Automated callers must supply a `password_provider` callback; there is no shared default. It reports usernames and record counts and never prints credentials. Existing accounts and IDs are preserved. Migrated accounts must change their temporary password before accessing groups. Accounts still using the retired bootstrap credential need an administrator-assisted reset; old setup sessions are rejected.
 
 ## Typical demo workflow
 
@@ -277,13 +352,13 @@ The tests cover password authentication, mocked Google authentication, OAuth sta
 
 The current production hosting target is Vercel. Connect the GitHub repository to a Vercel project, configure `MONGO_URI`, `MONGO_DB_NAME`, `SECRET_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, the production `GOOGLE_REDIRECT_URI`, and `SESSION_COOKIE_SECURE=true` in the Vercel project settings, and deploy from the intended production branch. Startup fails on Vercel if `SECRET_KEY` is missing. The production callback must use the deployed HTTPS domain and must exactly match a Google Cloud authorized redirect URI. Do not put secrets in the repository or frontend code. After deployment, replace the placeholder live URL near the top of this README with the actual public Vercel URL.
 
-The repository does not currently commit a `vercel.json` or a production URL, so the Vercel project settings are the source of truth for the live deployment configuration.
+The committed `vercel.json` disables automatic Git deployments. Vercel project settings remain the source of truth for environment values and domains; no production URL is committed.
 
 ### GitHub Actions
 
-`.github/workflows/deploy.yml` runs the test job on pushes to `main`, pull requests targeting `main`, and manual workflow runs. It installs the development dependencies and runs `pytest -q`.
+`.github/workflows/security.yml` runs the required security gate on every push, pull requests targeting either active branch, and manual runs. Scheduled checks cover both branches.
 
-The repository's GitHub Actions workflow is test-only. Production deployment is handled by Vercel's Git integration; no EC2 deployment job runs from this repository.
+`.github/workflows/release.yml` releases the exact main commit after its push-triggered Security workflow succeeds. Configure the production environment and branch protections before enabling releases. No EC2 deployment job runs from this repository.
 
 ### Archived EC2/Gunicorn path
 
@@ -310,6 +385,12 @@ Do not commit those values. EC2 deployment is not required for the current Verce
 - Keep GitHub and Vercel secrets in their secret-management settings.
 - Rotate exposed credentials immediately, use HTTPS in production, and keep the OAuth callback URI list narrow.
 - Google Sign-In stores the stable Google subject and verified email for identity matching; OAuth access and refresh tokens are not persisted.
+- New passwords are checked offline against a pinned list of 3,000 common passwords of at least eight characters. Existing passwords remain usable for sign-in. The list's provenance and license are recorded in `.security/password-blocklist.json`.
+- Changing a password or connecting/disconnecting a sign-in method ends other sessions. The session making an authenticated change stays signed in; password recovery ends all previous sessions.
+- Email changes and Google disconnection require password confirmation for password accounts. Google-only accounts must have signed in within five minutes before adding a password or changing email. Email recovery applies to existing password accounts; Google-only users add a password after signing in with Google.
+- New passwords cannot equal the username, email, or the app names documented in `services/password_policy.py`. Temporary migration passwords expire after 24 hours and must be replaced with a different password before group access.
+- Production uses a Secure, HttpOnly cookie with the `__Host-` prefix. This changes the production cookie name, so existing browser sessions require a new sign-in after release.
+- Sessions have a MongoDB record for immediate logout revocation, a 30-minute inactivity timeout, and a 12-hour absolute lifetime. Background notification polling does not renew activity. Expiry is checked on each authenticated request, independently of TTL cleanup.
 
 ## Project status
 

@@ -1,0 +1,53 @@
+name: Checked production release
+on:
+  workflow_run:
+    workflows: [Security]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: checked-production-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Verify the checked main commit
+        env:
+          CHECKED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$CHECKED_SHA" ]; then
+            echo 'Release skipped: the checked commit is no longer the main branch head.'
+            exit 1
+          fi
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - name: Install pinned release HTTP client
+        run: python -m pip install -r requirements-release.txt > "$RUNNER_TEMP/release-install.log" 2>&1
+      - name: Deploy checked commit
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          CHECKED_SHA: ${{ github.event.workflow_run.head_sha }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          python scripts/security_release.py
+      - name: Non-destructive production checks
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          python scripts/security_smoke.py

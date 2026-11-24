@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% from "partials/mfa_fields.html" import verification_code %}
+{% block external_fonts %}{% endblock %}
+{% block title %}Verify sign-in | Group Planner{% endblock %}
+{% block content %}
+<section class="auth-shell"><div class="card auth-card"><p class="eyebrow">One more step</p><h1>Verify your sign-in</h1><p>Enter the code from your authenticator app. You can also use a saved recovery code.</p>
+<form method="post" class="auth-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{{ verification_code() }}<button class="button auth-submit" type="submit">Verify and sign in</button></form>
+<form method="post" action="{{ url_for('mfa_cancel') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button secondary" type="submit">Start over</button></form></div></section>
+{% endblock %}
