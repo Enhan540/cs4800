@@ -347,6 +347,11 @@ def collect_locked(args, home):
                 if dynamic and dynamic.returncode == 0:
                     completed.add("zap")
 
+    if args.mode == "commit":
+        unchanged = git("write-tree") == identity
+        checks.append({"name": "staged-snapshot-unchanged", "completed": unchanged})
+        print("staged-snapshot: " + ("completed" if unchanged else "FAILED / staged content changed"))
+
     for item in findings:
         item.update(commit=identity, scanned_at=now())
     register = merge_findings(register, findings, branch, completed)

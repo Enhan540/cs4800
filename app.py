@@ -1455,7 +1455,6 @@ def create_app(database_override=None):
     def retain_changed_session(account):
         session["auth_version"] = account.get("auth_version", 0)
         session["csrf_token"] = secrets.token_urlsafe(32)
-        session["reauthenticated_at"] = time.time()
         if mfa.enabled(account):
             session["mfa_verified_epoch"] = account["mfa"]["epoch"]
             session["mfa_verified_at"] = time.time()

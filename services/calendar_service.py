@@ -1,6 +1,7 @@
 """Private calendar busy-interval handling for Group Planner."""
 
 import ipaddress
+import io
 import math
 import socket
 from time import monotonic
@@ -18,6 +19,7 @@ from icalendar import Calendar
 MAX_CALENDAR_BYTES = 2 * 1024 * 1024
 SYNC_WINDOW_DAYS = 366
 MAX_REDIRECTS = 3
+MAX_CALENDAR_FETCH_SECONDS = 20
 
 
 class CalendarFeedError(ValueError):
@@ -106,43 +108,116 @@ def safe_calendar_url(url):
     return parsed.geturl()
 
 
+class _CalendarDeadlineReader(io.RawIOBase):
+    def __init__(self, raw, transport):
+        self._raw = raw
+        self._transport = transport
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        self._transport.apply_read_timeout()
+        return self._raw.readinto(buffer)
+
+    def close(self):
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+class _CalendarDeadlineSocket:
+    def __init__(self, transport, deadline, read_timeout):
+        self._transport = transport
+        self._deadline = deadline
+        self._read_timeout = read_timeout
+
+    def __getattr__(self, name):
+        return getattr(self._transport, name)
+
+    def settimeout(self, value):
+        remaining = self._deadline - monotonic()
+        if remaining <= 0:
+            raise socket.timeout("Calendar transport deadline exceeded")
+        self._transport.settimeout(min(value if value is not None else self._read_timeout, remaining))
+
+    def apply_read_timeout(self):
+        self.settimeout(self._read_timeout)
+
+    def sendall(self, data, *args, **kwargs):
+        self.apply_read_timeout()
+        return self._transport.sendall(data, *args, **kwargs)
+
+    def makefile(self, mode="rb", *args, **kwargs):
+        if mode != "rb":
+            raise OSError("Unsupported calendar transport stream")
+        # Keep the socket's own file reference alive when a provider closes the
+        # connection after its headers. Check the deadline before every recv,
+        # including reads hidden inside buffered headers and decompression.
+        raw = self._transport.makefile("rb", buffering=0)
+        return io.BufferedReader(_CalendarDeadlineReader(raw, self))
+
+
 def pinned_calendar_get(url, **options):
     """Connect to a checked IP while verifying TLS against the original hostname."""
     parsed = urlsplit(url)
     address = public_calendar_addresses(parsed.hostname)[0]
+    deadline = options.get("deadline", monotonic() + MAX_CALENDAR_FETCH_SECONDS)
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise requests.Timeout("Calendar transport deadline exceeded")
+    connect_timeout, read_timeout = options.get("timeout", (3.05, 10))
+
+    class DeadlineHTTPSConnection(urllib3.connection.HTTPSConnection):
+        def connect(self):
+            super().connect()
+            self.sock = _CalendarDeadlineSocket(self.sock, deadline, read_timeout)
+
     pool = urllib3.HTTPSConnectionPool(address, port=443, server_hostname=parsed.hostname,
                                      assert_hostname=parsed.hostname, cert_reqs="CERT_REQUIRED",
                                      ca_certs=certifi.where(), retries=False)
+    pool.ConnectionCls = DeadlineHTTPSConnection
     class PinnedResponse(requests.Response):
         def close(self):
-            super().close()
-            pool.close()
+            try:
+                super().close()
+            finally:
+                pool.close()
     response = PinnedResponse()
     try:
         headers = {**options.get("headers", {}), "Host": parsed.hostname}
         raw = pool.urlopen("GET", parsed.path + ("?" + parsed.query if parsed.query else "") or "/",
                            headers=headers, redirect=False, preload_content=False,
-                           timeout=urllib3.Timeout(connect=3.05, read=10))
+                           timeout=urllib3.Timeout(connect=min(connect_timeout, remaining / 2),
+                                                   read=min(read_timeout, remaining)))
         response.raw, response.status_code, response.url = raw, raw.status, url
         response.headers.update(raw.headers)
         return response
-    except urllib3.exceptions.HTTPError as exc:
+    except (urllib3.exceptions.HTTPError, OSError) as exc:
         pool.close()
+        if isinstance(exc, (socket.timeout, urllib3.exceptions.TimeoutError)) or monotonic() >= deadline:
+            raise requests.Timeout("Calendar transport deadline exceeded") from exc
         raise requests.RequestException("Calendar connection failed") from exc
 
 
 def fetch_calendar_url(url, request_get=None):
     request_get = request_get or pinned_calendar_get
-    deadline = monotonic() + 20
+    deadline = monotonic() + MAX_CALENDAR_FETCH_SECONDS
     current_url = safe_calendar_url(url)
     for _redirect in range(MAX_REDIRECTS + 1):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise CalendarFeedError("timeout", "Calendar provider timed out.")
         try:
+            deadline_options = {"deadline": deadline} if request_get is pinned_calendar_get else {}
             response = request_get(
                 current_url,
-                timeout=(3.05, 10),
+                timeout=(min(3.05, remaining), min(10, remaining)),
                 allow_redirects=False,
                 stream=True,
                 headers={"Accept": "text/calendar, text/plain;q=0.8"},
+                **deadline_options,
             )
         except requests.Timeout as exc:
             raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
@@ -179,6 +254,8 @@ def fetch_calendar_url(url, request_get=None):
             except requests.Timeout as exc:
                 raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
             except requests.RequestException as exc:
+                if monotonic() >= deadline:
+                    raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
                 raise CalendarFeedError("network", "Calendar provider could not be reached.") from exc
             return body
         finally:
