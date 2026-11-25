@@ -19,7 +19,7 @@ from app import create_app
 def calendar_app(monkeypatch):
     database = mongomock.MongoClient().calendar_integration
     app = create_app(database_override=database)
-    app.config.update(TESTING=True, SECRET_KEY="test-secret", LOGIN_DISABLED=True)
+    app.config.update(TESTING=True, CSRF_ENABLED=False, SECRET_KEY="test-secret", LOGIN_DISABLED=True)
     monkeypatch.setattr("app.utc_now", lambda: datetime(2026, 11, 1, 20, tzinfo=timezone.utc))
     return app, database
 

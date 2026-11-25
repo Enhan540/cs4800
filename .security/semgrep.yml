@@ -1,0 +1,35 @@
+rules:
+  - id: python-dangerous-execution
+    languages: [python]
+    severity: ERROR
+    message: Review dynamic code execution.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+      - pattern: pickle.loads(...)
+      - pattern: yaml.load(...)
+  - id: python-tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: TLS verification must remain enabled.
+    pattern: $CALL(..., verify=False, ...)
+  - id: python-shell-execution
+    languages: [python]
+    severity: ERROR
+    message: Review shell execution.
+    pattern: $CALL(..., shell=True, ...)
+  - id: javascript-dom-html
+    languages: [javascript]
+    severity: WARNING
+    message: Review dynamic HTML construction and escaping.
+    pattern-either:
+      - pattern: $EL.innerHTML = $VALUE
+      - pattern: $EL.outerHTML = $VALUE
+      - pattern: $EL.insertAdjacentHTML(...)
+  - id: javascript-sensitive-storage
+    languages: [javascript]
+    severity: WARNING
+    message: Review browser-persisted data.
+    pattern-either:
+      - pattern: localStorage.setItem(...)
+      - pattern: sessionStorage.setItem(...)

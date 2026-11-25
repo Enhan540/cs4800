@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block external_fonts %}{% endblock %}
+{% block title %}Set up your authenticator | Group Planner{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('mfa_settings') }}">← Back to verification settings</a>
+<section class="narrow-page account-page"><div class="card account-section"><p class="eyebrow">Authenticator setup</p><h1>Scan, then verify</h1><p>Scan this QR code with your authenticator app, or enter the setup key manually. Keep this key private.</p>
+<img class="mfa-qr" data-sensitive-qr src="{{ url_for('mfa_setup_qr') }}" alt="Authenticator setup QR code" width="240" height="240">
+<p>Setup key: <code class="mfa-key" data-sensitive-key>{{ setup_key }}</code></p>
+<form method="post" action="{{ url_for('mfa_enable') }}" class="auth-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Six-digit authenticator code<input name="mfa_code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label><button class="button" type="submit">Turn on verification</button></form></div></section>
+{% endblock %}

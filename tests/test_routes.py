@@ -17,7 +17,7 @@ from app import create_app
 def app_and_db():
     database = mongomock.MongoClient().meetwise_test
     app = create_app(database_override=database)
-    app.config.update(TESTING=True, SECRET_KEY="test-secret", LOGIN_DISABLED=True)
+    app.config.update(TESTING=True, CSRF_ENABLED=False, SECRET_KEY="test-secret", LOGIN_DISABLED=True)
     return app, database
 
 
@@ -53,7 +53,7 @@ def test_shared_layout_includes_vercel_web_analytics(app_and_db):
     response = app.test_client().get("/")
 
     assert response.status_code == 200
-    assert b"window.va = window.va || function" in response.data
+    assert b'/static/js/security.js' in response.data
     assert b'<script defer src="/_vercel/insights/script.js"></script>' in response.data
 
 

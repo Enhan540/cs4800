@@ -1,0 +1,4 @@
+.mfa-qr { display: block; width: min(100%, 240px); height: auto; margin: 1.5rem 0; background: white; }
+.mfa-key { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+.mfa-recovery-list { display: grid; gap: .65rem; margin: 1.5rem 0; }
+.mfa-recovery-list code { display: block; overflow-wrap: anywhere; padding: .65rem; border: 1px solid #dce2ec; border-radius: .5rem; font-size: .9rem; }

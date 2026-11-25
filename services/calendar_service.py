@@ -1,19 +1,25 @@
 """Private calendar busy-interval handling for Group Planner."""
 
 import ipaddress
+import io
+import math
 import socket
+from time import monotonic
 from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import recurring_ical_events
 import requests
+import certifi
+import urllib3
 from icalendar import Calendar
 
 
 MAX_CALENDAR_BYTES = 2 * 1024 * 1024
 SYNC_WINDOW_DAYS = 366
 MAX_REDIRECTS = 3
+MAX_CALENDAR_FETCH_SECONDS = 20
 
 
 class CalendarFeedError(ValueError):
@@ -73,44 +79,145 @@ def merge_intervals(intervals):
     return merged
 
 
+def public_calendar_addresses(hostname):
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
+    except (OSError, socket.gaierror) as exc:
+        raise CalendarFeedError("dns", "Calendar host could not be resolved.") from exc
+    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
+    return sorted(addresses)
+
+
 def safe_calendar_url(url):
     parsed = urlsplit((url or "").strip())
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise CalendarFeedError("unsafe_url", "Calendar URLs must use HTTPS and a public hostname.")
+    try:
+        if parsed.port not in (None, 443):
+            raise ValueError("Non-HTTPS port")
+    except ValueError as exc:
+        raise CalendarFeedError("unsafe_url", "Calendar URLs must use the HTTPS port.") from exc
     hostname = parsed.hostname.rstrip(".")
     if hostname.casefold() in {
         "localhost", "localhost.localdomain", "metadata.google.internal",
         "metadata", "instance-data.ec2.internal",
     } or hostname.casefold().endswith(".localhost"):
         raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
-    except (OSError, socket.gaierror) as exc:
-        raise CalendarFeedError("dns", "Calendar host could not be resolved.") from exc
-    for address in addresses:
-        ip = ipaddress.ip_address(address)
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
+    public_calendar_addresses(hostname)
     return parsed.geturl()
 
 
-def fetch_calendar_url(url, request_get=requests.get):
+class _CalendarDeadlineReader(io.RawIOBase):
+    def __init__(self, raw, transport):
+        self._raw = raw
+        self._transport = transport
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        self._transport.apply_read_timeout()
+        return self._raw.readinto(buffer)
+
+    def close(self):
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+class _CalendarDeadlineSocket:
+    def __init__(self, transport, deadline, read_timeout):
+        self._transport = transport
+        self._deadline = deadline
+        self._read_timeout = read_timeout
+
+    def __getattr__(self, name):
+        return getattr(self._transport, name)
+
+    def settimeout(self, value):
+        remaining = self._deadline - monotonic()
+        if remaining <= 0:
+            raise socket.timeout("Calendar transport deadline exceeded")
+        self._transport.settimeout(min(value if value is not None else self._read_timeout, remaining))
+
+    def apply_read_timeout(self):
+        self.settimeout(self._read_timeout)
+
+    def sendall(self, data, *args, **kwargs):
+        self.apply_read_timeout()
+        return self._transport.sendall(data, *args, **kwargs)
+
+    def makefile(self, mode="rb", *args, **kwargs):
+        if mode != "rb":
+            raise OSError("Unsupported calendar transport stream")
+        # Keep the socket's own file reference alive when a provider closes the
+        # connection after its headers. Check the deadline before every recv,
+        # including reads hidden inside buffered headers and decompression.
+        raw = self._transport.makefile("rb", buffering=0)
+        return io.BufferedReader(_CalendarDeadlineReader(raw, self))
+
+
+def pinned_calendar_get(url, **options):
+    """Connect to a checked IP while verifying TLS against the original hostname."""
+    parsed = urlsplit(url)
+    address = public_calendar_addresses(parsed.hostname)[0]
+    deadline = options.get("deadline", monotonic() + MAX_CALENDAR_FETCH_SECONDS)
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise requests.Timeout("Calendar transport deadline exceeded")
+    connect_timeout, read_timeout = options.get("timeout", (3.05, 10))
+
+    class DeadlineHTTPSConnection(urllib3.connection.HTTPSConnection):
+        def connect(self):
+            super().connect()
+            self.sock = _CalendarDeadlineSocket(self.sock, deadline, read_timeout)
+
+    pool = urllib3.HTTPSConnectionPool(address, port=443, server_hostname=parsed.hostname,
+                                     assert_hostname=parsed.hostname, cert_reqs="CERT_REQUIRED",
+                                     ca_certs=certifi.where(), retries=False)
+    pool.ConnectionCls = DeadlineHTTPSConnection
+    class PinnedResponse(requests.Response):
+        def close(self):
+            try:
+                super().close()
+            finally:
+                pool.close()
+    response = PinnedResponse()
+    try:
+        headers = {**options.get("headers", {}), "Host": parsed.hostname}
+        raw = pool.urlopen("GET", parsed.path + ("?" + parsed.query if parsed.query else "") or "/",
+                           headers=headers, redirect=False, preload_content=False,
+                           timeout=urllib3.Timeout(connect=min(connect_timeout, remaining / 2),
+                                                   read=min(read_timeout, remaining)))
+        response.raw, response.status_code, response.url = raw, raw.status, url
+        response.headers.update(raw.headers)
+        return response
+    except (urllib3.exceptions.HTTPError, OSError) as exc:
+        pool.close()
+        if isinstance(exc, (socket.timeout, urllib3.exceptions.TimeoutError)) or monotonic() >= deadline:
+            raise requests.Timeout("Calendar transport deadline exceeded") from exc
+        raise requests.RequestException("Calendar connection failed") from exc
+
+
+def fetch_calendar_url(url, request_get=None):
+    request_get = request_get or pinned_calendar_get
+    deadline = monotonic() + MAX_CALENDAR_FETCH_SECONDS
     current_url = safe_calendar_url(url)
     for _redirect in range(MAX_REDIRECTS + 1):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise CalendarFeedError("timeout", "Calendar provider timed out.")
         try:
+            deadline_options = {"deadline": deadline} if request_get is pinned_calendar_get else {}
             response = request_get(
                 current_url,
-                timeout=(3.05, 10),
+                timeout=(min(3.05, remaining), min(10, remaining)),
                 allow_redirects=False,
                 stream=True,
                 headers={"Accept": "text/calendar, text/plain;q=0.8"},
+                **deadline_options,
             )
         except requests.Timeout as exc:
             raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
@@ -139,12 +246,16 @@ def fetch_calendar_url(url, request_get=requests.get):
             body = b""
             try:
                 for chunk in response.iter_content(chunk_size=65536):
+                    if monotonic() > deadline:
+                        raise CalendarFeedError("timeout", "Calendar provider timed out.")
                     body += chunk
                     if len(body) > MAX_CALENDAR_BYTES:
                         raise CalendarFeedError("too_large", "Calendar feed is too large.")
             except requests.Timeout as exc:
                 raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
             except requests.RequestException as exc:
+                if monotonic() >= deadline:
+                    raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
                 raise CalendarFeedError("network", "Calendar provider could not be reached.") from exc
             return body
         finally:
@@ -166,6 +277,31 @@ def parse_ical_busy_intervals(payload, *, start=None, end=None, default_timezone
         raise ValueError("Calendar feed is not valid iCalendar data.") from exc
     if calendar.get("VERSION") is None or calendar.get("PRODID") is None:
         raise ValueError("Calendar feed is not valid iCalendar data.")
+    if end <= start or end - start > timedelta(days=367):
+        raise ValueError("Calendar expansion must use a bounded date window.")
+    events = calendar.walk("VEVENT")
+    if len(events) > 5000:
+        raise ValueError("Calendar contains too many events.")
+    estimated = len(events)
+    for event in events:
+        rule = event.get("RRULE")
+        if rule:
+            frequency = str(rule.get("FREQ", [""])[0]).upper()
+            if frequency in {"SECONDLY", "MINUTELY"}:
+                raise ValueError("Calendar recurrence is too frequent.")
+            seconds = {"HOURLY": 3600, "DAILY": 86400, "WEEKLY": 604800, "MONTHLY": 2419200, "YEARLY": 31536000}.get(frequency, 1)
+            interval = max(1, int(rule.get("INTERVAL", [1])[0]))
+            multiplier = math.prod(max(1, len(rule.get(field, []))) for field in ("BYSECOND", "BYMINUTE", "BYHOUR", "BYDAY", "BYMONTHDAY", "BYMONTH"))
+            expanded = math.ceil((end - start).total_seconds() / seconds / interval) * multiplier
+            if rule.get("COUNT"):
+                expanded = min(expanded, int(rule["COUNT"][0]))
+            estimated += expanded
+        rdates = event.get("RDATE")
+        if rdates:
+            for item in rdates if isinstance(rdates, list) else [rdates]:
+                estimated += len(item.dts)
+        if estimated > 20000:
+            raise ValueError("Calendar recurrence exceeds the processing limit.")
     def event_interval(event):
         if str(event.get("TRANSP", "")).upper() == "TRANSPARENT":
             return None

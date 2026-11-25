@@ -1,0 +1,20 @@
+title = "Group Planner secret detection"
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated Python bytecode; original source is scanned"
+paths = ['''(^|/)__pycache__/''']
+
+[[rules]]
+id = "mongodb-credential"
+description = "Embedded database credential"
+regex = '''mongodb(?:\+srv)?://[^\s<>:/]+:[^\s<>@]+@[^\s<>]+'''
+[[rules.allowlists]]
+description = "Exact nonfunctional README setup placeholder"
+regexes = ['''mongodb\+srv://USERNAME:PASSWORD@CLUSTER\.mongodb\.net''']
+
+[[rules]]
+id = "private-calendar-url"
+description = "Private calendar subscription"
+regex = '''https://calendar\.google\.com/calendar/ical/[^\s"'<>]+/private-[a-zA-Z0-9]{16,}/[^\s"'<>]+'''

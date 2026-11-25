@@ -1,0 +1,6 @@
+{% macro verification_code() -%}
+<label>Verification code<input name="mfa_code" type="password" autocomplete="one-time-code" maxlength="80" required spellcheck="false"><small class="muted">Use your authenticator app or a saved recovery code.</small></label>
+{%- endmacro %}
+{% macro password_confirmation(has_password) -%}
+{% if has_password %}<label>Current password<input name="current_password" type="password" required autocomplete="current-password"></label>{% else %}<p class="muted">If prompted, sign out and sign in with Google again before making this change.</p>{% endif %}
+{%- endmacro %}

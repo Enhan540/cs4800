@@ -6,6 +6,7 @@ import re
 import secrets
 import base64
 import hashlib
+import time
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,9 +15,9 @@ from authlib.integrations.flask_client import OAuth
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, session, url_for
 from flask_login import LoginManager, UserMixin, current_user, login_required, login_user, logout_user
-from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from werkzeug.security import check_password_hash, generate_password_hash
 from cryptography.fernet import Fernet, InvalidToken
@@ -35,11 +36,16 @@ from services.notification_service import (
     PLAN_SCHEDULED,
     create_notification,
     get_user_notifications,
+    latest_user_notification,
     mark_read,
     resolve_notification,
     unread_count,
 )
 from services.email_service import send_password_reset_email, send_verification_email
+from services import mfa_service as mfa
+from services import security_alert_service as security_alerts
+from services.password_policy import legacy_password_setup_pending, legacy_setup_expired, legacy_setup_proof, password_error, retired_bootstrap_password
+from services.security_service import configure_security, init_security, recently_authenticated, revoke_session, session_active, session_digest
 from services.scheduling_service import DAYS, find_matching_times, parse_date, parse_time
 
 load_dotenv()
@@ -131,7 +137,7 @@ def create_app(database_override=None):
     configured_secret = os.getenv("SECRET_KEY") or os.getenv("FLASK_SECRET_KEY")
     if os.getenv("VERCEL") and not configured_secret:
         raise RuntimeError("SECRET_KEY must be configured in Vercel")
-    app.config["SECRET_KEY"] = configured_secret or "dev-only-change-me"
+    app.config["SECRET_KEY"] = configured_secret or secrets.token_hex(32)
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
@@ -149,6 +155,7 @@ def create_app(database_override=None):
         FROM_EMAIL=os.getenv("FROM_EMAIL", ""),
     )
 
+    configure_security(app)
     mongo_uri = os.getenv("MONGO_URI")
     database_name = os.getenv("MONGO_DB_NAME", "cs4800_database")
     database = database_override
@@ -189,6 +196,11 @@ def create_app(database_override=None):
             database.accounts.create_index("email_normalized", unique=True, sparse=True)
             database.account_tokens.create_index("token_hash", unique=True)
             database.account_tokens.create_index("expires_at", expireAfterSeconds=0)
+            database.security_sessions.create_index("expires_at", expireAfterSeconds=0)
+            database.mfa_setups.create_index("expires_at", expireAfterSeconds=0)
+            database.mfa_challenges.create_index("expires_at", expireAfterSeconds=0)
+            database.security_alerts.create_index("expires_at", expireAfterSeconds=0)
+            database.security_alerts.create_index([("state", ASCENDING), ("next_attempt_at", ASCENDING)])
             database.email_rate_limits.create_index(
                 [("key", ASCENDING)], unique=True
             )
@@ -217,13 +229,16 @@ def create_app(database_override=None):
                 [("recipient_user_id", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)]
             )
         except PyMongoError:
-            app.logger.exception("Unable to create MongoDB indexes during startup")
+            if app.config["SECURITY_PRODUCTION"]:
+                raise RuntimeError("Required production database indexes could not be verified") from None
+            app.logger.warning("Database indexes could not be initialized")
 
     login_manager = LoginManager()
     login_manager.login_view = "login"
     login_manager.login_message = "Please log in to continue."
     login_manager.login_message_category = "error"
     login_manager.init_app(app)
+    init_security(app, database)
 
     @app.context_processor
     def notification_context():
@@ -268,6 +283,14 @@ def create_app(database_override=None):
         try:
             document = database.accounts.find_one({"_id": ObjectId(account_id)})
         except (InvalidId, TypeError):
+            return None
+        if document and session.get("auth_version", 0) != document.get("auth_version", 0):
+            return None
+        if document and legacy_password_setup_pending(document) and (legacy_setup_expired(document) or session.get("legacy_setup_proof") != legacy_setup_proof(document)):
+            return None
+        if document and not session_active(database, document["_id"]):
+            return None
+        if document and mfa.enabled(document) and session.get("mfa_verified_epoch") != document["mfa"]["epoch"]:
             return None
         return Account(document) if document else None
 
@@ -798,6 +821,8 @@ def create_app(database_override=None):
 
     def plan_member_ids(plan, group):
         invited = plan.get("invited_member_ids")
+        # Scheduling retains the saved invitation snapshot. Current group access
+        # is enforced independently by route and notification authorization.
         return invited if invited is not None else group.get("member_ids", [])
 
     def get_user_plan_conflicts(plan, member_id):
@@ -1373,8 +1398,7 @@ def create_app(database_override=None):
             return None
         db = require_database()
         state_hash = hashlib.sha256(state.encode()).hexdigest()
-        record = db.google_oauth_states.find_one({"state_hash": state_hash})
-        db.google_oauth_states.delete_one({"state_hash": state_hash})
+        record = db.google_oauth_states.find_one_and_delete({"state_hash": state_hash})
         expires_at = record.get("expires_at") if record else None
         if expires_at and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -1394,12 +1418,14 @@ def create_app(database_override=None):
             query = {"$and": [query, {"_id": {"$ne": exclude_id}}]}
         return db.accounts.find_one(query)
 
-    def link_google_identity(db, account_id, claims):
+    def link_google_identity(db, account_id, claims, proof_version, *, verified_mfa=False):
         conflict = account_email_conflict(db, claims, exclude_id=account_id)
         if conflict:
             return False
         account = db.accounts.find_one({"_id": account_id})
         if not account:
+            return False
+        if account.get("auth_version") != proof_version:
             return False
         existing_sub = account.get("google_sub")
         if existing_sub and existing_sub != claims["sub"]:
@@ -1414,15 +1440,70 @@ def create_app(database_override=None):
         }
         if account_email == claims["email"]:
             verified_fields.update({"email_verified": True, "email_verified_at": utc_now()})
-        result = db.accounts.update_one(
-            {"_id": account_id, "$or": [
+        update = {"$set": verified_fields, "$addToSet": {"auth_methods": "google"}}
+        if existing_sub != claims["sub"]:
+            update["$inc"] = {"auth_version": 1}
+        return commit_security_change(account,
+            {"_id": account_id, "auth_version": proof_version, "$or": [
                 {"google_sub": {"$exists": False}},
                 {"google_sub": None},
                 {"google_sub": claims["sub"]},
             ]},
-            {"$set": verified_fields, "$addToSet": {"auth_methods": "google"}},
+            update, "google_connected", trusted_mfa=verified_mfa,
         )
-        return result.modified_count == 1 or existing_sub == claims["sub"]
+
+    def retain_changed_session(account):
+        session["auth_version"] = account.get("auth_version", 0)
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        if mfa.enabled(account):
+            session["mfa_verified_epoch"] = account["mfa"]["epoch"]
+            session["mfa_verified_at"] = time.time()
+        else:
+            session.pop("mfa_verified_epoch", None)
+            session.pop("mfa_verified_at", None)
+
+    def mfa_recent(account):
+        proved_at = session.get("mfa_verified_at")
+        return not mfa.enabled(account) or (session.get("mfa_verified_epoch") == account["mfa"]["epoch"] and isinstance(proved_at, (int, float)) and 0 <= time.time() - proved_at <= 300)
+
+    def mfa_attempt(account_id):
+        now = utc_now()
+        bucket = int(time.time()) // 900
+        key = hashlib.sha256(f"mfa:{account_id}:{bucket}".encode()).hexdigest()
+        result = require_database().security_rate_limits.find_one_and_update({"_id": key}, {"$inc": {"count": 1}, "$setOnInsert": {"expires_at": now + timedelta(minutes=30)}}, upsert=True, return_document=ReturnDocument.AFTER)
+        if result["count"] > 20:
+            abort(429)
+
+    def factor_proof(account, value=None):
+        if mfa.enabled(account):
+            mfa_attempt(account["_id"])
+        return mfa.proof(app, account, request.form.get("mfa_code", "") if value is None else value)
+
+    def commit_security_change(account, query, update, event, *, prepared_proof=None, trusted_mfa=False):
+        if trusted_mfa:
+            proof_query, effect = ({"mfa.epoch": account["mfa"]["epoch"]}, {}) if mfa.enabled(account) else ({"mfa.enabled": {"$ne": True}}, {})
+        else:
+            proof_query, effect = factor_proof(account) if prepared_proof is None else prepared_proof
+        return security_alerts.commit_change(app, require_database(), account, {"$and": [query, proof_query]}, mfa.merge_proof_update(update, effect), event)
+
+    @app.errorhandler(mfa.MFAError)
+    def invalid_factor(_error):
+        flash("That verification code is invalid or already used. Try a new authenticator code or a saved recovery code.", "error")
+        if request.endpoint == "reset_password":
+            return redirect(url_for("reset_password", token=request.view_args["token"]))
+        if request.endpoint == "mfa_enable":
+            return redirect(url_for("mfa_setup"))
+        return redirect(url_for("account"))
+
+    def account_change_proved(account):
+        if account.get("password_hash"):
+            return check_password_hash(account["password_hash"], request.form.get("current_password", ""))
+        return bool(account.get("google_sub") and recently_authenticated())
+
+    def account_proof_error(account):
+        message = "Confirm your current password before changing sign-in settings." if account.get("password_hash") else "Sign out and sign in with Google again before changing sign-in settings."
+        flash(message, "error")
+        return redirect(url_for("account"))
 
     def create_pending_google_link(db, claims, account_id):
         token = secrets.token_urlsafe(32)
@@ -1452,13 +1533,13 @@ def create_app(database_override=None):
             return None
         return record
 
-    def finish_pending_google_link(db, account):
+    def finish_pending_google_link(db, account, *, verified_mfa=False):
         record = pending_google_link(db)
         if not record:
             return False
         if record["account_id"] != account["_id"]:
             return None
-        linked = link_google_identity(db, account["_id"], record["claims"])
+        linked = link_google_identity(db, account["_id"], record["claims"], account.get("auth_version"), verified_mfa=verified_mfa)
         if linked:
             db.google_link_states.delete_one({"_id": record["_id"]})
             session.pop("pending_google_link_token", None)
@@ -1492,28 +1573,22 @@ def create_app(database_override=None):
 
     def issue_account_token(db, user_id, purpose, email):
         token = secrets.token_urlsafe(32)
+        account = db.accounts.find_one({"_id": user_id}) or {}
         db.account_tokens.insert_one({
             "user_id": user_id,
             "email": email,
             "purpose": purpose,
+            "auth_version": account.get("auth_version", 0),
             "token_hash": hashlib.sha256(token.encode()).hexdigest(),
             "created_at": utc_now(),
             "expires_at": utc_now() + timedelta(hours=24 if purpose == "verify_email" else 1),
         })
         return token
 
-    def consume_account_token(db, token, purpose):
+    def consume_account_token(db, token, purpose, *, consume=False):
         token_hash = hashlib.sha256(str(token).encode()).hexdigest()
-        record = db.account_tokens.find_one({"token_hash": token_hash, "purpose": purpose})
-        if not record:
-            return None
-        expires_at = record.get("expires_at")
-        if expires_at and expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at and expires_at < utc_now():
-            db.account_tokens.delete_one({"_id": record["_id"]})
-            return None
-        return record
+        operation = db.account_tokens.find_one_and_delete if consume else db.account_tokens.find_one
+        return operation({"token_hash": token_hash, "purpose": purpose, "expires_at": {"$gt": utc_now()}})
 
     def email_rate_limited(db, key, seconds=60):
         now = utc_now()
@@ -1538,6 +1613,13 @@ def create_app(database_override=None):
         db.account_tokens.delete_many({"user_id": account["_id"], "purpose": "verify_email"})
         token = issue_account_token(db, account["_id"], "verify_email", email)
         return send_verification_email(app, recipient=email, token=token)
+
+    @app.before_request
+    def enforce_legacy_password_setup():
+        if (current_user.is_authenticated and legacy_password_setup_pending(current_user.document)
+                and request.endpoint not in {"account", "change_password", "logout", "static", "privacy"}):
+            return redirect(url_for("account"))
+        return None
 
     @app.before_request
     def enforce_username_setup():
@@ -1569,8 +1651,9 @@ def create_app(database_override=None):
                 )
             if email and not valid_email(email):
                 errors.append("Enter a valid email address.")
-            if len(password) < 8:
-                errors.append("Password must be at least 8 characters.")
+            policy_error = password_error(password, username=username, email=email)
+            if policy_error:
+                errors.append(policy_error)
             if password != confirmation:
                 errors.append("Passwords do not match.")
             db = require_database()
@@ -1619,7 +1702,7 @@ def create_app(database_override=None):
             account = db.accounts.find_one(
                 {"normalized_username": username.casefold()}
             )
-            if not account or not account.get("password_hash") or not check_password_hash(
+            if not account or legacy_setup_expired(account) or (legacy_password_setup_pending(account) and retired_bootstrap_password(password)) or not account.get("password_hash") or not check_password_hash(
                 account["password_hash"], password
             ):
                 flash("Invalid username or password.", "error")
@@ -1627,6 +1710,8 @@ def create_app(database_override=None):
                     "login.html", username=username, next_url=next_url,
                     pending_google_link=bool(pending_google_link(db)),
                 ), 401
+            if mfa.enabled(account):
+                return begin_mfa_login(account, next_url, "password")
             link_result = finish_pending_google_link(db, account)
             if link_result is None:
                 flash("Sign in with the account that owns the matching email to connect Google.", "error")
@@ -1640,6 +1725,8 @@ def create_app(database_override=None):
                     "login.html", username=username, next_url=next_url,
                     pending_google_link=True,
                 ), 400
+            if link_result:
+                account = link_result
             login_user(Account(account))
             return redirect(next_url or (url_for("complete_username") if not account.get("username") else url_for("dashboard")))
         return render_template(
@@ -1650,11 +1737,190 @@ def create_app(database_override=None):
     @app.post("/logout")
     @login_required
     def logout():
+        revoke_session(require_database(), current_account_id())
         logout_user()
         session.pop("_flashes", None)
         session.pop("google_oauth_state", None)
         flash("You have been logged out.", "success")
         return redirect(url_for("index"))
+
+    def opaque_hash(value):
+        return hashlib.sha256(value.encode()).hexdigest() if isinstance(value, str) and value else None
+
+    def begin_mfa_login(account, next_url, first_factor):
+        db = require_database()
+        old = opaque_hash(session.get("mfa_challenge_id"))
+        if old:
+            db.mfa_challenges.delete_one({"_id": old, "browser_hash": opaque_hash(session.get("mfa_browser_nonce"))})
+        if current_user.is_authenticated:
+            revoke_session(db, current_account_id())
+        logout_user()
+        session.pop("security_session_id", None)
+        session.pop("mfa_verified_epoch", None)
+        raw, browser = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        db.mfa_challenges.insert_one({"_id": opaque_hash(raw), "browser_hash": opaque_hash(browser), "account_id": account["_id"], "auth_version": account.get("auth_version"), "factor_epoch": account["mfa"]["epoch"], "first_factor": first_factor, "google_sub": account.get("google_sub") if first_factor == "google" else None, "pending_google_hash": opaque_hash(session.get("pending_google_link_token")) if first_factor == "password" else None, "next_url": safe_next_url(next_url), "attempts": 0, "expires_at": utc_now() + timedelta(minutes=5)})
+        session["mfa_challenge_id"], session["mfa_browser_nonce"] = raw, browser
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        return redirect(url_for("mfa_challenge"))
+
+    def challenge_filter():
+        return {"_id": opaque_hash(session.get("mfa_challenge_id")), "browser_hash": opaque_hash(session.get("mfa_browser_nonce")), "expires_at": {"$gt": utc_now()}, "attempts": {"$lt": 8}}
+
+    @app.route("/auth/mfa", methods=["GET", "POST"])
+    def mfa_challenge():
+        db = require_database()
+        if current_user.is_authenticated:
+            return redirect(url_for("dashboard"))
+        query = challenge_filter()
+        if request.method == "POST":
+            challenge = db.mfa_challenges.find_one_and_update(query, {"$inc": {"attempts": 1}}, return_document=ReturnDocument.AFTER)
+        else:
+            challenge = db.mfa_challenges.find_one(query)
+        account = db.accounts.find_one({"_id": challenge["account_id"]}) if challenge else None
+        valid = account and mfa.enabled(account) and account.get("auth_version") == challenge["auth_version"] and account["mfa"]["epoch"] == challenge["factor_epoch"]
+        if valid and challenge["first_factor"] == "google":
+            valid = account.get("google_sub") == challenge.get("google_sub")
+        if not valid:
+            flash("That sign-in attempt expired. Start sign-in again.", "error")
+            return redirect(url_for("login"))
+        if request.method == "POST":
+            try:
+                proof_query, effect = factor_proof(account)
+            except mfa.MFAError:
+                flash("That code is invalid or already used. Try a new code or a saved recovery code.", "error")
+                return render_template("mfa_challenge.html"), 401
+            claimed = db.mfa_challenges.find_one_and_delete({"_id": challenge["_id"], "browser_hash": challenge["browser_hash"], "expires_at": {"$gt": utc_now()}})
+            if not claimed:
+                return redirect(url_for("login"))
+            account_query = {"$and": [{"_id": account["_id"], "auth_version": account.get("auth_version")}, proof_query]}
+            if "$pull" in effect:
+                updated = security_alerts.commit_change(app, db, account, account_query, effect, "mfa_recovery_used")
+            else:
+                updated = db.accounts.find_one_and_update(account_query, effect, return_document=ReturnDocument.AFTER)
+            if not updated:
+                flash("That sign-in attempt changed. Start sign-in again.", "error")
+                return redirect(url_for("login"))
+            if challenge["first_factor"] == "password":
+                if opaque_hash(session.get("pending_google_link_token")) != challenge.get("pending_google_hash"):
+                    return redirect(url_for("login"))
+                linked = finish_pending_google_link(db, updated, verified_mfa=True)
+                if linked is None or (linked is False and session.get("pending_google_link_token")):
+                    return redirect(url_for("login"))
+                if linked:
+                    updated = linked
+            login_user(Account(updated))
+            session["mfa_verified_epoch"] = updated["mfa"]["epoch"]
+            session["mfa_verified_at"] = time.time()
+            session.pop("mfa_challenge_id", None)
+            session.pop("mfa_browser_nonce", None)
+            return redirect(safe_next_url(challenge.get("next_url")) or url_for("complete_username" if not updated.get("username") else "dashboard"))
+        return render_template("mfa_challenge.html")
+
+    @app.post("/auth/mfa/cancel")
+    def mfa_cancel():
+        require_database().mfa_challenges.delete_one({"_id": opaque_hash(session.get("mfa_challenge_id")), "browser_hash": opaque_hash(session.get("mfa_browser_nonce"))})
+        session.pop("mfa_challenge_id", None)
+        session.pop("mfa_browser_nonce", None)
+        return redirect(url_for("login"))
+
+    def mfa_view(account):
+        return {"username": account.get("username", ""), "has_password": bool(account.get("password_hash")), "enabled": mfa.enabled(account), "remaining_codes": len((account.get("mfa") or {}).get("recovery_code_hashes", []))}
+
+    def pending_mfa_setup():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        query = {"_id": opaque_hash(session.get("mfa_setup_id")), "account_id": current_account_id(), "session_digest": session_digest(), "expires_at": {"$gt": utc_now()}, "auth_version": account.get("auth_version") if account else None, "attempts": {"$lt": 8}}
+        setup = db.mfa_setups.find_one(query)
+        if not account or mfa.enabled(account) or not setup:
+            abort(404)
+        return account, setup
+
+    @app.get("/account/mfa")
+    @login_required
+    def mfa_settings():
+        account = require_database().accounts.find_one({"_id": current_account_id()})
+        return render_template("mfa_settings.html", account=mfa_view(account))
+
+    @app.route("/account/mfa/setup", methods=["GET", "POST"])
+    @login_required
+    def mfa_setup():
+        db = require_database()
+        if request.method == "POST":
+            account = db.accounts.find_one({"_id": current_account_id()})
+            if mfa.enabled(account):
+                return redirect(url_for("mfa_settings"))
+            if not account_change_proved(account):
+                return account_proof_error(account)
+            import pyotp
+            raw, seed = secrets.token_urlsafe(32), pyotp.random_base32()
+            db.mfa_setups.delete_many({"account_id": current_account_id(), "session_digest": session_digest()})
+            db.mfa_setups.insert_one({"_id": opaque_hash(raw), "account_id": current_account_id(), "session_digest": session_digest(), "auth_version": account.get("auth_version"), "seed_ciphertext": mfa.encrypt_seed(app, seed), "attempts": 0, "expires_at": utc_now() + timedelta(minutes=5)})
+            session["mfa_setup_id"] = raw
+            return redirect(url_for("mfa_setup"))
+        account, setup = pending_mfa_setup()
+        return render_template("mfa_setup.html", account=mfa_view(account), setup_key=mfa.decrypt_seed(app, setup["seed_ciphertext"]))
+
+    @app.get("/account/mfa/setup/qr")
+    @login_required
+    def mfa_setup_qr():
+        import pyotp
+        import qrcode
+        from qrcode.image.svg import SvgPathImage
+        account, setup = pending_mfa_setup()
+        uri = pyotp.TOTP(mfa.decrypt_seed(app, setup["seed_ciphertext"])).provisioning_uri(name=account["username"], issuer_name="Group Planner")
+        document = qrcode.make(uri, image_factory=SvgPathImage).to_string()
+        return Response(document, mimetype="image/svg+xml")
+
+    @app.post("/account/mfa/enable")
+    @login_required
+    def mfa_enable():
+        db = require_database()
+        account, setup = pending_mfa_setup()
+        mfa_attempt(account["_id"])
+        attempt = db.mfa_setups.find_one_and_update({"_id": setup["_id"], "session_digest": session_digest(), "expires_at": {"$gt": utc_now()}, "attempts": {"$lt": 8}}, {"$inc": {"attempts": 1}}, return_document=ReturnDocument.AFTER)
+        if not attempt:
+            abort(429)
+        step = mfa.matching_step(mfa.decrypt_seed(app, setup["seed_ciphertext"]), request.form.get("mfa_code", ""))
+        factor, codes = mfa.factor_document(app, mfa.decrypt_seed(app, setup["seed_ciphertext"]), step)
+        claimed = db.mfa_setups.find_one_and_delete({"_id": setup["_id"], "session_digest": session_digest(), "expires_at": {"$gt": utc_now()}})
+        if not claimed:
+            return redirect(url_for("mfa_settings"))
+        updated = commit_security_change(account, {"mfa.enabled": {"$ne": True}}, {"$set": {"mfa": factor, "updated_at": utc_now()}, "$inc": {"auth_version": 1}}, "mfa_enabled")
+        if not updated:
+            return redirect(url_for("account"))
+        retain_changed_session(updated)
+        session.pop("mfa_setup_id", None)
+        return render_template("mfa_recovery_codes.html", codes=codes)
+
+    @app.post("/account/mfa/disable")
+    @login_required
+    def mfa_disable():
+        account = require_database().accounts.find_one({"_id": current_account_id()})
+        if not mfa.enabled(account):
+            return redirect(url_for("mfa_settings"))
+        if not account_change_proved(account):
+            return account_proof_error(account)
+        updated = commit_security_change(account, {}, {"$unset": {"mfa": ""}, "$set": {"updated_at": utc_now()}, "$inc": {"auth_version": 1}}, "mfa_disabled")
+        if updated:
+            retain_changed_session(updated)
+            flash("Authenticator verification was turned off.", "success")
+        return redirect(url_for("mfa_settings"))
+
+    @app.post("/account/mfa/recovery")
+    @login_required
+    def mfa_regenerate_recovery():
+        account = require_database().accounts.find_one({"_id": current_account_id()})
+        if not mfa.enabled(account):
+            abort(404)
+        if not account_change_proved(account):
+            return account_proof_error(account)
+        codes, hashes = mfa.new_recovery_codes()
+        factor = dict(account["mfa"], epoch=secrets.token_hex(16), recovery_code_hashes=hashes)
+        updated = commit_security_change(account, {}, {"$set": {"mfa": factor, "updated_at": utc_now()}, "$inc": {"auth_version": 1}}, "mfa_recovery_regenerated")
+        if not updated:
+            return redirect(url_for("account"))
+        retain_changed_session(updated)
+        return render_template("mfa_recovery_codes.html", codes=codes)
 
     @app.get("/auth/google")
     def google_auth():
@@ -1707,20 +1973,24 @@ def create_app(database_override=None):
         db = require_database()
         flow = state_record.get("flow")
         if flow == "connect":
-            if not current_user.is_authenticated or str(current_account_id()) != str(state_record.get("account_id")):
+            if not current_user.is_authenticated or not recently_authenticated() or not mfa_recent(current_user.document) or str(current_account_id()) != str(state_record.get("account_id")):
                 flash("Please remain signed in while connecting Google.", "error")
                 return redirect(url_for("login"))
             if account_email_conflict(db, claims, exclude_id=current_account_id()):
                 flash("That Google identity is already linked to another account.", "error")
                 return redirect(url_for("account"))
-            if not link_google_identity(db, current_account_id(), claims):
+            linked_account = link_google_identity(db, current_account_id(), claims, current_user.document.get("auth_version"), verified_mfa=True)
+            if not linked_account:
                 flash("Google could not be connected to this account.", "error")
                 return redirect(url_for("account"))
+            retain_changed_session(linked_account)
             flash("Google connected to your Group Planner account.", "success")
             return redirect(url_for("account"))
 
         account_document = db.accounts.find_one({"google_sub": claims["sub"]})
         if account_document:
+            if mfa.enabled(account_document):
+                return begin_mfa_login(account_document, None, "google")
             login_user(Account(account_document))
             return redirect(url_for("complete_username" if not account_document.get("username") else "dashboard"))
 
@@ -1764,6 +2034,9 @@ def create_app(database_override=None):
     @app.get("/auth/google/connect")
     @login_required
     def google_connect():
+        if not recently_authenticated() or not mfa_recent(current_user.document):
+            flash("Sign out and sign in again before connecting a sign-in method.", "error")
+            return redirect(url_for("account"))
         if not app.config["GOOGLE_CLIENT_ID"] or not app.config["GOOGLE_CLIENT_SECRET"]:
             flash("Google sign-in is not configured for this deployment.", "error")
             return redirect(url_for("account"))
@@ -1998,6 +2271,8 @@ def create_app(database_override=None):
         document = db.accounts.find_one({"_id": current_account_id()})
         if not document:
             abort(404)
+        if legacy_password_setup_pending(document):
+            flash("Change your temporary password to continue using your groups.", "warning")
         connections = list(db.calendar_connections.find({"account_id": current_account_id()}))
         zone = ZoneInfo(app.config["APP_TIMEZONE"])
         for connection in connections:
@@ -2063,6 +2338,8 @@ def create_app(database_override=None):
             abort(404)
         remaining = username_change_remaining(account)
         if request.method == "POST":
+            if not account_change_proved(account):
+                return account_proof_error(account)
             username = request.form.get("username", "").strip()
             error = username_error(username)
             if error:
@@ -2073,11 +2350,12 @@ def create_app(database_override=None):
                 flash("Username changes are available again next month.", "error")
             else:
                 try:
-                    result = db.accounts.update_one(
+                    result = commit_security_change(account,
                         {"_id": account["_id"], "normalized_username": {"$ne": username.casefold()}},
-                        {"$set": {"username": username, "normalized_username": username.casefold(), "updated_at": utc_now()}, "$push": {"username_change_history": utc_now()}},
+                        {"$set": {"username": username, "normalized_username": username.casefold(), "updated_at": utc_now()}, "$push": {"username_change_history": utc_now()}, "$inc": {"auth_version": 1}}, "username_changed",
                     )
-                    if result.modified_count:
+                    if result:
+                        retain_changed_session(result)
                         flash("Username updated successfully.", "success")
                         return redirect(url_for("account"))
                 except DuplicateKeyError:
@@ -2088,7 +2366,7 @@ def create_app(database_override=None):
     @app.get("/verify-email/<token>")
     def verify_email(token):
         db = require_database()
-        record = consume_account_token(db, token, "verify_email")
+        record = consume_account_token(db, token, "verify_email", consume=True)
         if not record:
             flash("That email verification link is invalid or has expired.", "error")
             return redirect(url_for("login"))
@@ -2104,20 +2382,35 @@ def create_app(database_override=None):
     @login_required
     def update_account_email():
         db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account:
+            abort(404)
+        if not account_change_proved(account):
+            return account_proof_error(account)
         email = normalize_email(request.form.get("email"))
         if not valid_email(email):
             flash("Enter a valid email address.", "error")
+            return redirect(url_for("account"))
+        if email == normalize_email(account.get("email")):
+            flash("That is already your email address.", "error")
             return redirect(url_for("account"))
         conflict = db.accounts.find_one({"$or": [{"normalized_email": email}, {"email_normalized": email}], "_id": {"$ne": current_account_id()}})
         if conflict:
             flash("That email is already in use.", "error")
             return redirect(url_for("account"))
-        db.account_tokens.delete_many({"user_id": current_account_id(), "purpose": "verify_email"})
-        db.accounts.update_one(
-            {"_id": current_account_id()},
-            {"$set": {"email": email, "normalized_email": email, "email_normalized": email, "email_verified": False, "email_verified_at": None, "updated_at": utc_now()}},
-        )
-        account = db.accounts.find_one({"_id": current_account_id()})
+        try:
+            account = commit_security_change(account,
+                {"_id": current_account_id(), "auth_version": account.get("auth_version")},
+                {"$set": {"email": email, "normalized_email": email, "email_normalized": email, "email_verified": False, "email_verified_at": None, "updated_at": utc_now()}, "$inc": {"auth_version": 1}},
+                "email_changed",
+            )
+        except DuplicateKeyError:
+            flash("That email is already in use.", "error")
+            return redirect(url_for("account"))
+        if not account:
+            abort(404)
+        db.account_tokens.delete_many({"user_id": current_account_id()})
+        retain_changed_session(account)
         send_verification_for_account(db, account)
         flash("Email updated. Check your email to verify it.", "success")
         return redirect(url_for("account"))
@@ -2137,7 +2430,7 @@ def create_app(database_override=None):
         if request.method == "POST":
             email = normalize_email(request.form.get("email"))
             db = require_database()
-            account = db.accounts.find_one({"$or": [{"normalized_email": email}, {"email_normalized": email}], "email_verified": True}) if valid_email(email) else None
+            account = db.accounts.find_one({"$or": [{"normalized_email": email}, {"email_normalized": email}], "email_verified": True, "password_hash": {"$type": "string", "$ne": ""}}) if valid_email(email) else None
             if account and not email_rate_limited(db, f"reset:{account['_id']}"):
                 token = issue_account_token(db, account["_id"], "password_reset", email)
                 send_password_reset_email(app, recipient=email, token=token)
@@ -2149,23 +2442,40 @@ def create_app(database_override=None):
     def reset_password(token):
         db = require_database()
         record = consume_account_token(db, token, "password_reset")
-        if not record:
+        account = db.accounts.find_one({"_id": record["user_id"]}) if record else None
+        if (not account or not account.get("password_hash") or not account.get("email_verified")
+                or normalize_email(account.get("email")) != (record or {}).get("email")
+                or account.get("auth_version", 0) != record.get("auth_version", 0)):
             flash("That password reset link is invalid or has expired.", "error")
             return redirect(url_for("forgot_password"))
         if request.method == "POST":
             password = request.form.get("password", "")
             confirmation = request.form.get("confirm_password", "")
-            if len(password) < 8 or password != confirmation:
-                flash("Passwords must match and be at least 8 characters.", "error")
-                return render_template("reset_password.html", token=token), 400
-            db.accounts.update_one(
-                {"_id": record["user_id"]},
-                {"$set": {"password_hash": generate_password_hash(password), "must_change_password": False, "updated_at": utc_now()}, "$addToSet": {"auth_methods": "password"}},
+            policy_error = password_error(password, username=account.get("username", ""), email=account.get("email", ""))
+            if legacy_password_setup_pending(account) and check_password_hash(account["password_hash"], password):
+                policy_error = "Choose a password different from your temporary password."
+            if policy_error or password != confirmation:
+                flash(policy_error or "Passwords do not match.", "error")
+                return render_template("reset_password.html", token=token, requires_mfa=mfa.enabled(account)), 400
+            if mfa.enabled(account):
+                attempt = db.account_tokens.find_one_and_update({"_id": record["_id"], "expires_at": {"$gt": utc_now()}, "$or": [{"mfa_attempts": {"$exists": False}}, {"mfa_attempts": {"$lt": 8}}]}, {"$inc": {"mfa_attempts": 1}}, return_document=ReturnDocument.AFTER)
+                if not attempt:
+                    return redirect(url_for("forgot_password"))
+            prepared = factor_proof(account)
+            record = consume_account_token(db, token, "password_reset", consume=True)
+            if not record:
+                return redirect(url_for("forgot_password"))
+            result = commit_security_change(account,
+                {"_id": record["user_id"], "email": account["email"], "email_verified": True, "auth_version": account.get("auth_version")},
+                {"$set": {"password_hash": generate_password_hash(password), "must_change_password": False, "updated_at": utc_now()}, "$addToSet": {"auth_methods": "password"}, "$inc": {"auth_version": 1}}, "password_reset", prepared_proof=prepared,
             )
+            if not result:
+                flash("That password reset link is invalid or has expired.", "error")
+                return redirect(url_for("forgot_password"))
             db.account_tokens.delete_many({"user_id": record["user_id"], "purpose": "password_reset"})
             flash("Password updated successfully.", "success")
             return redirect(url_for("login"))
-        return render_template("reset_password.html", token=token)
+        return render_template("reset_password.html", token=token, requires_mfa=mfa.enabled(account))
 
     @app.post("/account/google/disconnect")
     @login_required
@@ -2178,15 +2488,22 @@ def create_app(database_override=None):
         if not account.get("password_hash"):
             flash("Set a password before disconnecting your only sign-in method.", "error")
             return redirect(url_for("account"))
-        db.accounts.update_one(
-            {"_id": account["_id"]},
+        if not account_change_proved(account):
+            return account_proof_error(account)
+        updated = commit_security_change(account,
+            {"_id": account["_id"], "google_sub": account["google_sub"], "password_hash": account["password_hash"], "auth_version": account.get("auth_version")},
             {"$unset": {
                 "google_sub": "",
                 "google_email": "",
                 "google_email_verified": "",
                 "google_name": "",
-            }, "$pull": {"auth_methods": "google"}, "$set": {"updated_at": utc_now()}},
+            }, "$pull": {"auth_methods": "google"}, "$set": {"updated_at": utc_now()}, "$inc": {"auth_version": 1}},
+            "google_disconnected",
         )
+        if not updated:
+            flash("Your sign-in methods changed. Refresh the page and try again.", "error")
+            return redirect(url_for("account"))
+        retain_changed_session(updated)
         flash("Google was disconnected. Your password remains active.", "success")
         return redirect(url_for("account"))
 
@@ -2206,20 +2523,28 @@ def create_app(database_override=None):
         if not check_password_hash(account["password_hash"], current_password):
             flash("Current password is incorrect.", "error")
             return redirect(url_for("account"))
-        if len(new_password) < 8:
-            flash("New password must be at least 8 characters.", "error")
+        policy_error = password_error(new_password, username=account.get("username", ""), email=account.get("email", ""))
+        if legacy_password_setup_pending(account) and new_password == current_password:
+            policy_error = "Choose a password different from your temporary password."
+        if policy_error:
+            flash(policy_error, "error")
             return redirect(url_for("account"))
         if new_password != confirmation:
             flash("New passwords do not match.", "error")
             return redirect(url_for("account"))
-        db.accounts.update_one(
-            {"_id": account["_id"]},
+        updated = commit_security_change(account,
+            {"_id": account["_id"], "password_hash": account["password_hash"], "auth_version": account.get("auth_version")},
             {"$set": {
                 "password_hash": generate_password_hash(new_password),
                 "must_change_password": False,
                 "updated_at": utc_now(),
-            }, "$addToSet": {"auth_methods": "password"}},
+            }, "$addToSet": {"auth_methods": "password"}, "$inc": {"auth_version": 1}},
+            "password_changed",
         )
+        if not updated:
+            flash("Your password changed. Sign in again before retrying.", "error")
+            return redirect(url_for("login"))
+        retain_changed_session(updated)
         flash("Password updated successfully.", "success")
         return redirect(url_for("account"))
 
@@ -2227,19 +2552,33 @@ def create_app(database_override=None):
     @login_required
     def set_password():
         db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account:
+            abort(404)
+        if account.get("password_hash"):
+            flash("A password is already set. Use Change Password instead.", "error")
+            return redirect(url_for("account"))
+        if not account_change_proved(account):
+            return account_proof_error(account)
         password = request.form.get("new_password", "")
         confirmation = request.form.get("confirm_password", "")
-        if len(password) < 8 or password != confirmation:
-            flash("Passwords must match and be at least 8 characters.", "error")
+        policy_error = password_error(password, username=account.get("username", ""), email=account.get("email", ""))
+        if policy_error or password != confirmation:
+            flash(policy_error or "Passwords do not match.", "error")
             return redirect(url_for("account"))
-        db.accounts.update_one(
-            {"_id": current_account_id(), "$or": [
+        updated = commit_security_change(account,
+            {"_id": current_account_id(), "auth_version": account.get("auth_version"), "$or": [
                 {"password_hash": {"$exists": False}},
                 {"password_hash": None},
                 {"password_hash": ""},
             ]},
-            {"$set": {"password_hash": generate_password_hash(password), "must_change_password": False, "updated_at": utc_now()}, "$addToSet": {"auth_methods": "password"}},
+            {"$set": {"password_hash": generate_password_hash(password), "must_change_password": False, "updated_at": utc_now()}, "$addToSet": {"auth_methods": "password"}, "$inc": {"auth_version": 1}},
+            "password_added",
         )
+        if not updated:
+            flash("A password is already set. Use Change Password instead.", "error")
+            return redirect(url_for("account"))
+        retain_changed_session(updated)
         flash("Password added successfully.", "success")
         return redirect(url_for("account"))
 
@@ -2788,6 +3127,15 @@ def create_app(database_override=None):
                 return jsonify({"ok": False, "error": "That invitation is no longer available."}), 409
             flash("That group no longer exists.", "error")
             return redirect(url_for("dashboard"))
+        result = db.group_invites.update_one(
+            {"_id": invite["_id"], "invited_user_id": current_account_id(), "status": "pending"},
+            {"$set": {"status": status, "responded_at": utc_now()}},
+        )
+        if result.modified_count != 1:
+            if wants_json_response():
+                return jsonify({"ok": False, "error": "That invitation is no longer available."}), 409
+            flash("This invitation has already been answered.", "error")
+            return redirect(url_for("dashboard"))
         if status == "accepted":
             member = ensure_account_member()
             db.groups.update_one(
@@ -2795,10 +3143,6 @@ def create_app(database_override=None):
                 {"$addToSet": {"member_ids": member["_id"], "account_ids": current_account_id()},
                  "$set": {f"account_roles.{current_account_id()}": "member"}},
             )
-        result = db.group_invites.update_one(
-            {"_id": invite["_id"], "invited_user_id": current_account_id(), "status": "pending"},
-            {"$set": {"status": status, "responded_at": utc_now()}},
-        )
         notification = db.notifications.find_one({
             "invite_id": invite["_id"],
             "recipient_user_id": current_account_id(),
@@ -2806,11 +3150,7 @@ def create_app(database_override=None):
         })
         if notification:
             resolve_notification(db, notification["_id"], current_account_id())
-        if result.modified_count != 1:
-            if wants_json_response():
-                return jsonify({"ok": False, "error": "That invitation is no longer available."}), 409
-            flash("This invitation has already been answered.", "error")
-        elif status == "accepted":
+        if status == "accepted":
             flash(f"You joined {group['name']}.", "success")
         else:
             flash("Invitation declined.", "success")
@@ -2925,6 +3265,7 @@ def create_app(database_override=None):
             "plan_title": metadata.get("plan_title", "Scheduled plan"),
             "scheduled_start": metadata.get("scheduled_start", ""),
             "scheduled_end": metadata.get("scheduled_end", ""),
+            "message": metadata.get("message", "") if notification.get("type") == "SECURITY_CHANGE" else "",
             "invite_id": str(notification["invite_id"]) if notification.get("invite_id") else None,
             "plan_id": str(notification["plan_id"]) if notification.get("plan_id") else None,
             "group_id": str(notification["group_id"]) if notification.get("group_id") else None,
@@ -2948,10 +3289,7 @@ def create_app(database_override=None):
     @login_required
     def api_notification_summary():
         db = require_database()
-        latest = db.notifications.find_one(
-            {"recipient_user_id": current_account_id()},
-            sort=[("created_at", DESCENDING)],
-        )
+        latest = latest_user_notification(db, current_account_id())
         return jsonify({
             "unread_count": unread_count(db, current_account_id()),
             "latest_created_at": latest.get("created_at").isoformat() if latest and latest.get("created_at") else None,
@@ -3194,7 +3532,7 @@ def create_app(database_override=None):
             changes = json.loads(request.form.get("availability_payload", "[]"))
         except json.JSONDecodeError:
             changes = None
-        if not isinstance(changes, list):
+        if not isinstance(changes, list) or len(changes) > 100:
             if wants_json_response():
                 return jsonify({"error": "Availability changes could not be read."}), 400
             flash("Availability changes could not be read.", "error")
@@ -3206,7 +3544,7 @@ def create_app(database_override=None):
         }
         changes_to_apply = []
         for change in changes:
-            if not isinstance(change, dict) or change.get("id") not in existing:
+            if not isinstance(change, dict) or not isinstance(change.get("id"), str) or change["id"] not in existing:
                 if wants_json_response():
                     return jsonify({"error": "One of the availability windows could not be found."}), 400
                 flash("One of the availability windows could not be found.", "error")
@@ -3754,4 +4092,4 @@ def create_app(database_override=None):
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
+    app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=False)

@@ -4,7 +4,7 @@
 <label class="unified-time-input"><span>{{ label }}</span><span class="unified-time-control"><input name="{{ name }}" type="text" value="{{ value|time_input if value else '' }}" placeholder="Optional" inputmode="text" autocomplete="off" aria-label="{{ label }}, optional" data-unified-time></span></label>
 {%- endmacro %}
 {% macro rsvp_form(row) -%}
-<form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form data-arrival-default="{{ rsvp_time_defaults.arrival|time_input if rsvp_time_defaults.arrival else '' }}" data-departure-default="{{ rsvp_time_defaults.departure|time_input if rsvp_time_defaults.departure else '' }}"><input type="hidden" name="member_id" value="{{ row.member._id }}"><label>Response<select name="status" required data-rsvp-status><option value="pending"{% if row.status == 'pending' %} selected{% endif %}>Pending</option><option value="attending"{% if row.status == 'attending' %} selected{% endif %}>Attending</option><option value="not_attending"{% if row.status == 'not_attending' %} selected{% endif %}>Not Attending</option></select></label><div class="rsvp-modifiers" data-rsvp-modifiers><label><input type="checkbox" name="arriving_late"{% if row.arriving_late %} checked{% endif %} data-rsvp-arriving-late> Arriving late</label><label><input type="checkbox" name="leaving_early"{% if row.leaving_early %} checked{% endif %} data-rsvp-leaving-early> Leaving early</label></div><div class="rsvp-details" data-rsvp-details><div class="rsvp-time-field" data-rsvp-arrival-field>{{ time_picker('arrival_time', row.arrival_time, 'Arrival time') }}</div><div class="rsvp-time-field" data-rsvp-departure-field>{{ time_picker('departure_time', row.departure_time, 'Leaving time') }}</div></div><div class="rsvp-action"><button class="button secondary" type="submit">Save RSVP</button></div></form>
+<form class="rsvp-form" method="post" action="{{ url_for('update_rsvp', plan_id=plan._id) }}" data-rsvp-form data-arrival-default="{{ rsvp_time_defaults.arrival|time_input if rsvp_time_defaults.arrival else '' }}" data-departure-default="{{ rsvp_time_defaults.departure|time_input if rsvp_time_defaults.departure else '' }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="member_id" value="{{ row.member._id }}"><label>Response<select name="status" required data-rsvp-status><option value="pending"{% if row.status == 'pending' %} selected{% endif %}>Pending</option><option value="attending"{% if row.status == 'attending' %} selected{% endif %}>Attending</option><option value="not_attending"{% if row.status == 'not_attending' %} selected{% endif %}>Not Attending</option></select></label><div class="rsvp-modifiers" data-rsvp-modifiers><label><input type="checkbox" name="arriving_late"{% if row.arriving_late %} checked{% endif %} data-rsvp-arriving-late> Arriving late</label><label><input type="checkbox" name="leaving_early"{% if row.leaving_early %} checked{% endif %} data-rsvp-leaving-early> Leaving early</label></div><div class="rsvp-details" data-rsvp-details><div class="rsvp-time-field" data-rsvp-arrival-field>{{ time_picker('arrival_time', row.arrival_time, 'Arrival time') }}</div><div class="rsvp-time-field" data-rsvp-departure-field>{{ time_picker('departure_time', row.departure_time, 'Leaving time') }}</div></div><div class="rsvp-action"><button class="button secondary" type="submit">Save RSVP</button></div></form>
 {%- endmacro %}
 {% block content %}
 <a class="back-link" href="{{ url_for('group_detail', group_id=group._id) }}">← Back to {{ group.name }}</a>
@@ -20,7 +20,7 @@
     </div>
     {% if can_manage_group %}<div class="button-row heading-actions scheduled-actions">
       <a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Edit Plan</a>
-      <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this scheduled plan and all RSVP responses?"><button class="button danger" type="submit">Delete Plan</button></form>
+      <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this scheduled plan and all RSVP responses?"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button danger" type="submit">Delete Plan</button></form>
     </div>{% endif %}
   </section>
 
@@ -34,7 +34,7 @@
     {% if can_manage_group and eligible_invitees %}
       <details class="invite-details">
         <summary class="button secondary">+ Invite Members</summary>
-        <form method="post" action="{{ url_for('invite_plan_member', plan_id=plan._id) }}" class="invite-form">
+        <form method="post" action="{{ url_for('invite_plan_member', plan_id=plan._id) }}" class="invite-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <label for="invite_member_id">Group member<select id="invite_member_id" name="member_id" required><option value="">Select a member</option>{% for member in eligible_invitees %}<option value="{{ member._id }}">{{ member.display_name }}</option>{% endfor %}</select></label>
           <button class="button" type="submit">Invite</button>
         </form>
@@ -91,8 +91,8 @@
     <div><p class="eyebrow">{{ group.name }} · Planning</p><h1>{{ plan.title }}</h1><p class="muted">{{ plan.start_date }} through {{ plan.end_date }}</p></div>
     {% if can_manage_group %}<div class="button-row heading-actions">
       <a class="button secondary" href="{{ url_for('edit_plan', plan_id=plan._id) }}">Edit Plan</a>
-      <form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}"><button class="button" type="submit">Find Matching Times</button></form>
-      <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this plan and its saved results?"><button class="button danger" type="submit">Delete Plan</button></form>
+      <form method="post" action="{{ url_for('find_plan_times', plan_id=plan._id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button" type="submit">Find Matching Times</button></form>
+      <form method="post" action="{{ url_for('delete_plan', plan_id=plan._id) }}" data-confirm="Delete this plan and its saved results?"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button danger" type="submit">Delete Plan</button></form>
     </div>{% endif %}
   </section>
 
@@ -111,7 +111,7 @@
             <div class="match-main"><span class="match-badge {% if not exact %}alternative{% endif %}">{% if exact %}Exact match{% else %}Shorter alternative{% endif %}</span><h3>{{ match.day }}, {{ match.date }}</h3><p>{{ match.start_time|time12 }} – {{ match.end_time|time12 }}</p>{% if not exact %}<p class="available-duration">Available duration: {{ match.available_duration_minutes|duration_label }}</p>{% endif %}</div>
             <div class="attendance"><strong>{{ match.attendance_count }}/{{ match.total_members }}</strong><span>available</span></div>
             <div class="match-members"><p><strong>{% if match.attendance_count == match.total_members %}Everyone available{% else %}{{ match.total_members - match.attendance_count }} unavailable{% endif %}</strong></p></div>
-            {% if can_manage_group %}<form class="match-action" method="post" action="{{ url_for('schedule_plan', plan_id=plan._id) }}" {% if not exact %}data-confirm="Requested duration: {{ plan.duration_minutes|duration_label }}. Selected available duration: {{ match.available_duration_minutes|duration_label }}. Schedule this shorter option?"{% endif %}><input type="hidden" name="match_index" value="{{ loop.index0 }}">{% if not exact %}<input type="hidden" name="confirm_shorter" value="yes">{% endif %}<button class="button {% if not exact %}secondary{% endif %}" type="submit">Schedule this {% if not exact %}shorter option{% else %}time{% endif %}</button></form>{% endif %}
+            {% if can_manage_group %}<form class="match-action" method="post" action="{{ url_for('schedule_plan', plan_id=plan._id) }}" {% if not exact %}data-confirm="Requested duration: {{ plan.duration_minutes|duration_label }}. Selected available duration: {{ match.available_duration_minutes|duration_label }}. Schedule this shorter option?"{% endif %}><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="match_index" value="{{ loop.index0 }}">{% if not exact %}<input type="hidden" name="confirm_shorter" value="yes">{% endif %}<button class="button {% if not exact %}secondary{% endif %}" type="submit">Schedule this {% if not exact %}shorter option{% else %}time{% endif %}</button></form>{% endif %}
           </article>
         {% endfor %}
       </div>

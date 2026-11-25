@@ -3,7 +3,7 @@
 {% block content %}
 <section class="auth-shell"><div class="card auth-card"><p class="eyebrow">Welcome back</p><h1>Log in</h1><p class="muted auth-intro">Continue planning with your groups.</p>
   {% if pending_google_link %}<div class="callout"><strong>Connect Google to your existing account</strong><p class="muted">Sign in with the username and password for the account that owns this Google email. No new account will be created.</p></div>{% endif %}
-  <form method="post" class="auth-form">
+  <form method="post" class="auth-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
     <label for="username">Username<input id="username" name="username" value="{{ username }}" required autocomplete="username" autofocus></label>
     <label for="password">Password<span class="password-control"><input id="password" name="password" type="password" required autocomplete="current-password" data-password-input><button type="button" class="password-toggle" aria-label="Show password" aria-pressed="false" data-password-toggle>Show</button></span></label>

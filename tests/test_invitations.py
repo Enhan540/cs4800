@@ -11,7 +11,7 @@ from app import create_app
 def invitation_app_and_db():
     database = mongomock.MongoClient().invitation_test
     app = create_app(database_override=database)
-    app.config.update(TESTING=True, SECRET_KEY="invitation-test", LOGIN_DISABLED=False)
+    app.config.update(TESTING=True, CSRF_ENABLED=False, SECRET_KEY="invitation-test", LOGIN_DISABLED=False)
     return app, database
 
 

@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Group Planner{% endblock %}</title>
   <meta name="theme-color" content="#4f46e5">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  {% block external_fonts %}<link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@600;700&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@600;700&amp;display=swap" rel="stylesheet">{% endblock %}
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/security.css') }}">
 </head>
 <body class="{% if current_user.is_authenticated %}authenticated-shell{% else %}public-shell{% endif %}">
   {% if current_user.is_authenticated %}
@@ -33,8 +35,8 @@
     <p data-unsaved-message>These changes have not been saved.</p>
     <div class="dialog-actions"><button class="button secondary" type="button" data-unsaved-keep>Keep Editing</button><button class="button danger" type="button" data-unsaved-discard>Discard Changes</button></div>
   </dialog>
-  <script>window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };</script>
-  <script defer src="/_vercel/insights/script.js"></script>
+  <script src="{{ url_for('static', filename='js/security.js') }}"></script>
+  {% if request.endpoint in ['index', 'privacy'] %}<script defer src="/_vercel/insights/script.js"></script>{% endif %}
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
