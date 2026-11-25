@@ -277,6 +277,49 @@ def test_recent_google_sign_in_can_confirm_an_email_change(secured, monkeypatch)
     assert client.get("/account").status_code == 200
 
 
+@pytest.mark.parametrize("first_path,first_values,second_path,second_values", [
+    ("/account/username", {"username": "changed-audit-owner"},
+     "/account/email", {"email": "later@example.invalid"}),
+    ("/account/email", {"email": "first@example.invalid"},
+     "/account/username", {"username": "later-audit-owner"}),
+])
+def test_settings_changes_do_not_extend_google_primary_proof(
+    secured, monkeypatch, first_path, first_values, second_path, second_values
+):
+    import time
+    from tests.test_auth import configured_google_client, start_google_login
+
+    app, db, ids, _password = secured
+    clock = [time.time()]
+    monkeypatch.setattr("app.time.time", lambda: clock[0])
+    db.accounts.update_one({"_id": ids["owner"]}, {
+        "$unset": {"password_hash": ""},
+        "$set": {"google_sub": "synthetic-freshness-boundary", "auth_methods": ["google"]},
+    })
+    configured_google_client(app, profile={
+        "sub": "synthetic-freshness-boundary", "email": "owner@example.invalid", "email_verified": True,
+    })
+    monkeypatch.setattr("app.send_verification_email", lambda *args, **kwargs: True)
+    client = app.test_client()
+    _, state = start_google_login(client)
+    assert client.get(f"/auth/google/callback?state={state}").status_code == 302
+
+    clock[0] += 250
+    response = client.post(first_path, data=first_values, headers={"X-CSRF-Token": token(client)})
+    assert response.status_code == 302
+    saved = db.accounts.find_one({"_id": ids["owner"]})
+    field = "username" if first_path.endswith("username") else "email"
+    assert saved[field] == first_values[field]
+
+    clock[0] += 61
+    before = db.accounts.find_one({"_id": ids["owner"]})
+    response = client.post(second_path, data=second_values,
+                           headers={"X-CSRF-Token": token(client)}, follow_redirects=True)
+    assert b"sign in with Google again" in response.data
+    assert db.accounts.find_one({"_id": ids["owner"]}) == before
+    assert client.get("/account").status_code == 200
+
+
 def test_contextual_passwords_are_rejected_without_changing_login_verification(secured):
     from services.password_policy import password_error
 
