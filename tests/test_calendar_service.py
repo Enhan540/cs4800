@@ -91,9 +91,7 @@ def test_private_calendar_urls_are_rejected():
 
 
 def test_google_public_and_secret_ical_links_pass_url_validation(monkeypatch):
-    monkeypatch.setattr("services.calendar_service.socket.getaddrinfo", lambda *_args, **_kwargs: [
-        (None, None, None, None, ("8.8.8.8", 443)),
-    ])
+    monkeypatch.setattr("services.calendar_service.dns.resolver.Resolver.resolve", lambda *_args, **_kwargs: ["8.8.8.8"])
     for path in ("public/basic.ics", "private-secret/basic.ics"):
         url = f"https://calendar.google.com/calendar/ical/example%40gmail.com/{path}"
         assert safe_calendar_url(url) == url
@@ -106,9 +104,7 @@ def test_google_public_and_secret_ical_links_pass_url_validation(monkeypatch):
     (404, "not_found"),
 ])
 def test_ical_fetch_classifies_provider_failure_without_exposing_secret_url(monkeypatch, status, expected_code):
-    monkeypatch.setattr("services.calendar_service.socket.getaddrinfo", lambda *_args, **_kwargs: [
-        (None, None, None, None, ("8.8.8.8", 443)),
-    ])
+    monkeypatch.setattr("services.calendar_service.dns.resolver.Resolver.resolve", lambda *_args, **_kwargs: ["8.8.8.8"])
     secret_url = "https://calendar.google.com/calendar/ical/example%40gmail.com/private-secret/basic.ics"
 
     class FailedResponse:
@@ -131,9 +127,7 @@ def test_ical_fetch_classifies_provider_failure_without_exposing_secret_url(monk
 
 
 def test_ical_fetch_returns_valid_feed_and_closes_response(monkeypatch):
-    monkeypatch.setattr("services.calendar_service.socket.getaddrinfo", lambda *_args, **_kwargs: [
-        (None, None, None, None, ("8.8.8.8", 443)),
-    ])
+    monkeypatch.setattr("services.calendar_service.dns.resolver.Resolver.resolve", lambda *_args, **_kwargs: ["8.8.8.8"])
     payload = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nEND:VCALENDAR\r\n"
 
     class FeedResponse:
