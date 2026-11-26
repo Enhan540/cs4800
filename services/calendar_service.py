@@ -13,6 +13,8 @@ import recurring_ical_events
 import requests
 import certifi
 import urllib3
+import dns.exception
+import dns.resolver
 from icalendar import Calendar
 
 
@@ -20,6 +22,7 @@ MAX_CALENDAR_BYTES = 2 * 1024 * 1024
 SYNC_WINDOW_DAYS = 366
 MAX_REDIRECTS = 3
 MAX_CALENDAR_FETCH_SECONDS = 20
+MAX_CALENDAR_DNS_SECONDS = 3.05
 
 
 class CalendarFeedError(ValueError):
@@ -79,17 +82,46 @@ def merge_intervals(intervals):
     return merged
 
 
-def public_calendar_addresses(hostname):
+def public_calendar_addresses(hostname, *, deadline=None):
+    deadline = min(deadline if deadline is not None else math.inf,
+                   monotonic() + MAX_CALENDAR_DNS_SECONDS)
+    if monotonic() >= deadline:
+        raise CalendarFeedError("timeout", "Calendar provider timed out.")
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
-    except (OSError, socket.gaierror) as exc:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal = None
+    try:
+        addresses = {str(literal)} if literal is not None else set()
+        if literal is None:
+            resolver = dns.resolver.get_default_resolver()
+            for family in ("A", "AAAA"):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise CalendarFeedError("timeout", "Calendar provider timed out.")
+                try:
+                    # Absolute names avoid resolver search-domain expansion.
+                    # A and AAAA share one lifetime; do not fall back to the
+                    # system getaddrinfo call or leave background DNS workers.
+                    answer = resolver.resolve(hostname.rstrip(".") + ".", family,
+                                              lifetime=remaining, search=False)
+                    addresses.update(str(record) for record in answer)
+                except dns.resolver.NoAnswer:
+                    continue
+        if monotonic() >= deadline:
+            raise CalendarFeedError("timeout", "Calendar provider timed out.")
+    except dns.exception.Timeout as exc:
+        raise CalendarFeedError("timeout", "Calendar provider timed out.") from exc
+    except CalendarFeedError:
+        raise
+    except (dns.exception.DNSException, OSError, ValueError) as exc:
         raise CalendarFeedError("dns", "Calendar host could not be resolved.") from exc
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
         raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
     return sorted(addresses)
 
 
-def safe_calendar_url(url):
+def safe_calendar_url(url, *, deadline=None):
     parsed = urlsplit((url or "").strip())
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise CalendarFeedError("unsafe_url", "Calendar URLs must use HTTPS and a public hostname.")
@@ -104,7 +136,7 @@ def safe_calendar_url(url):
         "metadata", "instance-data.ec2.internal",
     } or hostname.casefold().endswith(".localhost"):
         raise CalendarFeedError("unsafe_url", "Calendar URL must not point to a private network.")
-    public_calendar_addresses(hostname)
+    public_calendar_addresses(hostname, deadline=deadline)
     return parsed.geturl()
 
 
@@ -162,8 +194,8 @@ class _CalendarDeadlineSocket:
 def pinned_calendar_get(url, **options):
     """Connect to a checked IP while verifying TLS against the original hostname."""
     parsed = urlsplit(url)
-    address = public_calendar_addresses(parsed.hostname)[0]
     deadline = options.get("deadline", monotonic() + MAX_CALENDAR_FETCH_SECONDS)
+    address = public_calendar_addresses(parsed.hostname, deadline=deadline)[0]
     remaining = deadline - monotonic()
     if remaining <= 0:
         raise requests.Timeout("Calendar transport deadline exceeded")
@@ -204,7 +236,7 @@ def pinned_calendar_get(url, **options):
 def fetch_calendar_url(url, request_get=None):
     request_get = request_get or pinned_calendar_get
     deadline = monotonic() + MAX_CALENDAR_FETCH_SECONDS
-    current_url = safe_calendar_url(url)
+    current_url = safe_calendar_url(url, deadline=deadline)
     for _redirect in range(MAX_REDIRECTS + 1):
         remaining = deadline - monotonic()
         if remaining <= 0:
@@ -228,7 +260,7 @@ def fetch_calendar_url(url, request_get=None):
                 location = response.headers.get("Location")
                 if not location:
                     raise CalendarFeedError("redirect", "Calendar redirect had no destination.")
-                current_url = safe_calendar_url(urljoin(current_url, location))
+                current_url = safe_calendar_url(urljoin(current_url, location), deadline=deadline)
                 continue
             status = response.status_code
             if status == 429:
