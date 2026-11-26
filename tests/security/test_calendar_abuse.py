@@ -1,4 +1,4 @@
-import socket
+import dns.resolver
 
 import pytest
 
@@ -9,7 +9,7 @@ pytestmark = pytest.mark.security
 
 @pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "10.0.0.1", "::1", "::ffff:127.0.0.1", "fc00::1"])
 def test_private_dns_answers_are_rejected(monkeypatch, address):
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))])
+    monkeypatch.setattr(dns.resolver.Resolver, "resolve", lambda *a, **kw: [address])
     with pytest.raises(CalendarFeedError):
         safe_calendar_url("https://synthetic.example.invalid/feed.ics")
 

@@ -104,7 +104,7 @@ def slow_calendar_provider(tmp_path, monkeypatch):
         options["port"] = server.server_port
         return real_pool(address, **options)
 
-    monkeypatch.setattr(calendar_service, "public_calendar_addresses", lambda _host: ["127.0.0.1"])
+    monkeypatch.setattr(calendar_service, "public_calendar_addresses", lambda _host, **kw: ["127.0.0.1"])
     monkeypatch.setattr(calendar_service.certifi, "where", lambda: str(certificate_file))
     monkeypatch.setattr(calendar_service.urllib3, "HTTPSConnectionPool", local_pool)
     monkeypatch.setattr(calendar_service, "MAX_CALENDAR_FETCH_SECONDS", 0.6, raising=False)
