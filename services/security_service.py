@@ -172,7 +172,7 @@ def init_security(app, database):
                 throttle(f"demo:{current_user.id}", 10, 900)
             if current_user.is_authenticated and request.endpoint in {"schedule_preview", "find_plan_times", "sync_calendar", "create_plan", "edit_plan"}:
                 throttle(f"expensive:{current_user.id}", 30, 60)
-            if current_user.is_authenticated and request.method == "POST" and request.endpoint in {"change_username", "change_password", "set_password", "update_account_email", "disconnect_google_identity", "mfa_setup", "mfa_enable", "mfa_disable", "mfa_regenerate_recovery"}:
+            if current_user.is_authenticated and request.method == "POST" and request.endpoint in {"change_username", "change_password", "set_password", "update_account_email", "disconnect_google_identity", "mfa_setup", "mfa_enable", "mfa_disable", "mfa_regenerate_recovery", "delete_account"}:
                 throttle(f"account-change:{current_user.id}", 20, 900)
 
     @app.after_request

@@ -1634,6 +1634,8 @@ def create_app(database_override=None):
             return redirect(url_for("reset_password", token=request.view_args["token"]))
         if request.endpoint == "mfa_enable":
             return redirect(url_for("mfa_setup"))
+        if request.endpoint == "delete_account":
+            return redirect(url_for("delete_account"))
         return redirect(url_for("account"))
 
     def account_change_proved(account):
@@ -2404,6 +2406,109 @@ def create_app(database_override=None):
             abort(404)
         flash("Calendar disconnected. Your weekly availability is unchanged.", "success")
         return redirect(url_for("account"))
+
+    def account_deletion_plan(db, account_id):
+        """Describe what deleting this account changes; nothing is modified here."""
+        owned = list(db.groups.find({"owner_account_id": account_id}))
+        blocking = [group for group in owned if not group.get("is_demo")
+                    and any(other != account_id for other in group.get("account_ids", []))]
+        deleted = [group for group in owned if group not in blocking]
+        left = list(db.groups.find({"owner_account_id": {"$ne": account_id}, "account_ids": account_id}))
+        return {"blocking": blocking, "deleted": deleted, "left": left}
+
+    def delete_account_data(db, account_id):
+        """Remove an account and everything that exists only because of it.
+
+        Groups owned by others keep their own data, including members without
+        accounts that this account added; only this account's place is removed.
+        """
+        profile_ids = [item["_id"] for item in db.users.find({
+            "$or": [{"linked_account_id": account_id},
+                    {"account_id": account_id, "is_managed": {"$ne": True}, "is_demo": {"$ne": True}}],
+        }, {"_id": 1})]
+        for group in db.groups.find({"owner_account_id": account_id}):
+            if group.get("is_demo"):
+                clear_demo_group(db, group)
+                continue
+            managed_ids = [item["_id"] for item in db.users.find(
+                {"is_managed": True, "managed_group_id": group["_id"]}, {"_id": 1})]
+            db.plans.delete_many({"group_id": group["_id"]})
+            db.notifications.delete_many({"group_id": group["_id"]})
+            db.group_invites.delete_many({"group_id": group["_id"]})
+            db.availability.delete_many({"user_id": {"$in": managed_ids}})
+            db.users.delete_many({"_id": {"$in": managed_ids}, "is_managed": True})
+            db.groups.delete_one({"_id": group["_id"], "owner_account_id": account_id})
+        left_group_ids = [item["_id"] for item in db.groups.find(
+            {"$or": [{"account_ids": account_id}, {"member_ids": {"$in": profile_ids}}]}, {"_id": 1})]
+        db.groups.update_many(
+            {"_id": {"$in": left_group_ids}},
+            {"$pull": {"account_ids": account_id, "member_ids": {"$in": profile_ids}},
+             "$unset": {f"account_roles.{account_id}": "", f"admin_permissions.{account_id}": ""}},
+        )
+        plan_update = {"$pull": {"invited_member_ids": {"$in": profile_ids},
+                                 "scheduled_available_member_ids": {"$in": profile_ids}}}
+        unset = {f"rsvps.{profile_id}": "" for profile_id in profile_ids}
+        if unset:
+            plan_update["$unset"] = unset
+        db.plans.update_many({"group_id": {"$in": left_group_ids}}, plan_update)
+        invite_ids = [item["_id"] for item in db.group_invites.find(
+            {"$or": [{"invited_user_id": account_id}, {"invited_by_user_id": account_id}]}, {"_id": 1})]
+        db.notifications.delete_many({"$or": [{"recipient_user_id": account_id}, {"invite_id": {"$in": invite_ids}}]})
+        db.group_invites.delete_many({"_id": {"$in": invite_ids}})
+        db.availability.delete_many({"user_id": {"$in": profile_ids}})
+        db.users.delete_many({"_id": {"$in": profile_ids}})
+        db.calendar_connections.delete_many({"account_id": account_id})
+        db.account_tokens.delete_many({"user_id": account_id})
+        for name in ("mfa_setups", "mfa_challenges", "security_alerts", "google_oauth_states",
+                     "google_link_states", "security_sessions"):
+            db[name].delete_many({"account_id": account_id})
+        db.accounts.delete_one({"_id": account_id})
+
+    @app.route("/account/delete", methods=["GET", "POST"])
+    @login_required
+    def delete_account():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        if not account:
+            abort(404)
+        plan = account_deletion_plan(db, account["_id"])
+        page = lambda status=200: (render_template(
+            "account_delete.html", account=account, plan=plan,
+            mfa_enabled=mfa.enabled(account), has_password=bool(account.get("password_hash")),
+        ), status)
+        if request.method == "GET":
+            return page()
+        if plan["blocking"]:
+            flash("Delete the groups you own that other people belong to before deleting your account.", "error")
+            return redirect(url_for("delete_account"))
+        if request.form.get("confirm_username", "").strip().casefold() != account.get("normalized_username", account.get("username", "")).casefold() \
+                or request.form.get("confirm_permanent") != "yes":
+            flash("Type your username and tick the box to confirm.", "error")
+            return page(400)
+        if not account_change_proved(account):
+            message = ("Your current password is incorrect." if account.get("password_hash")
+                       else "Sign out and sign in with Google again, then delete your account within 5 minutes.")
+            flash(message, "error")
+            return page(400)
+        proof_query, effect = factor_proof(account)
+        # One atomic claim: the account is unchanged since this page loaded, and
+        # any authenticator code is consumed so it can't be replayed.
+        claim = mfa.merge_proof_update(
+            {"$set": {"deletion_started_at": utc_now()}, "$inc": {"auth_version": 1}}, effect)
+        claimed = db.accounts.find_one_and_update(
+            {"$and": [{"_id": account["_id"], "auth_version": account.get("auth_version")}, proof_query]}, claim)
+        if not claimed:
+            flash("Your account changed while you were confirming. Refresh the page and try again.", "error")
+            return redirect(url_for("delete_account"))
+        if account_deletion_plan(db, account["_id"])["blocking"]:
+            db.accounts.update_one({"_id": account["_id"]}, {"$unset": {"deletion_started_at": ""}})
+            flash("Someone joined a group you own. Delete that group first, then try again.", "error")
+            return redirect(url_for("delete_account"))
+        delete_account_data(db, account["_id"])
+        logout_user()
+        session.clear()
+        flash("Your account and its data were deleted.", "success")
+        return redirect(url_for("index"))
 
     @app.get("/account")
     @login_required
