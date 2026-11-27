@@ -163,6 +163,11 @@ def create_app(database_override=None):
         GOOGLE_REDIRECT_URI=os.getenv("GOOGLE_REDIRECT_URI", ""),
         GOOGLE_CALENDAR_REDIRECT_URI=os.getenv("GOOGLE_CALENDAR_REDIRECT_URI", ""),
         SUPPORT_EMAIL=os.getenv("SUPPORT_EMAIL", ""),
+        # "limited" while the Google consent screen is in Testing mode (approved
+        # test users only, 7-day authorization); "public" once it is verified.
+        GOOGLE_CALENDAR_ACCESS=(
+            "public" if os.getenv("GOOGLE_CALENDAR_ACCESS", "").strip().casefold() == "public" else "limited"
+        ),
         APP_TIMEZONE=timezone_name,
         APP_BASE_URL=os.getenv("APP_BASE_URL", ""),
         EMAIL_DELIVERY_MODE=os.getenv("EMAIL_DELIVERY_MODE", "console"),
@@ -260,6 +265,13 @@ def create_app(database_override=None):
     login_manager.login_message_category = "error"
     login_manager.init_app(app)
     init_security(app, database)
+
+    @app.context_processor
+    def google_calendar_access_context():
+        return {
+            "google_calendar_limited": app.config.get("GOOGLE_CALENDAR_ACCESS") != "public",
+            "support_email": app.config.get("SUPPORT_EMAIL", ""),
+        }
 
     @app.context_processor
     def notification_context():
@@ -2221,6 +2233,9 @@ def create_app(database_override=None):
             return redirect(url_for("account"))
         if request.args.get("error"):
             flash("Google Calendar connection was cancelled or denied.", "error")
+            if app.config.get("GOOGLE_CALENDAR_ACCESS") != "public":
+                flash("If Google said access is blocked, your Google account may not be approved yet. "
+                      "Google Calendar is in limited testing; ask the developer to add your Google email.", "error")
             return redirect(url_for("account"))
         try:
             token = app.extensions["google_calendar_oauth_client"].authorize_access_token()
