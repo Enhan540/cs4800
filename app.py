@@ -41,7 +41,7 @@ from services.notification_service import (
     resolve_notification,
     unread_count,
 )
-from services.email_service import send_password_reset_email, send_verification_email
+from services.email_service import send_email, send_password_reset_email, send_verification_email
 from services import mfa_service as mfa
 from services import security_alert_service as security_alerts
 from services.password_policy import legacy_password_setup_pending, legacy_setup_expired, legacy_setup_proof, password_error, retired_bootstrap_password
@@ -163,6 +163,8 @@ def create_app(database_override=None):
         GOOGLE_REDIRECT_URI=os.getenv("GOOGLE_REDIRECT_URI", ""),
         GOOGLE_CALENDAR_REDIRECT_URI=os.getenv("GOOGLE_CALENDAR_REDIRECT_URI", ""),
         SUPPORT_EMAIL=os.getenv("SUPPORT_EMAIL", ""),
+        # Where in-app requests are emailed; never rendered into pages.
+        FEEDBACK_EMAIL=os.getenv("FEEDBACK_EMAIL", ""),
         # "limited" while the Google consent screen is in Testing mode (approved
         # test users only, 7-day authorization); "public" once it is verified.
         GOOGLE_CALENDAR_ACCESS=(
@@ -239,6 +241,7 @@ def create_app(database_override=None):
                 [("user_id", ASCENDING), ("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
             database.groups.create_index("created_at")
+            database.calendar_access_requests.create_index("expires_at", expireAfterSeconds=0)
             database.groups.create_index(
                 [("owner_account_id", ASCENDING)],
                 unique=True,
@@ -266,11 +269,14 @@ def create_app(database_override=None):
     login_manager.init_app(app)
     init_security(app, database)
 
+    def developer_email():
+        return (app.config.get("FEEDBACK_EMAIL") or app.config.get("SUPPORT_EMAIL") or "").strip()
+
     @app.context_processor
     def google_calendar_access_context():
         return {
             "google_calendar_limited": app.config.get("GOOGLE_CALENDAR_ACCESS") != "public",
-            "support_email": app.config.get("SUPPORT_EMAIL", ""),
+            "calendar_request_enabled": bool(developer_email()),
         }
 
     @app.context_processor
@@ -2478,6 +2484,42 @@ def create_app(database_override=None):
                      "google_link_states", "security_sessions"):
             db[name].delete_many({"account_id": account_id})
         db.accounts.delete_one({"_id": account_id})
+
+    @app.post("/account/google-calendar-access")
+    @login_required
+    def request_google_calendar_access():
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()})
+        recipient = developer_email()
+        if not account or not recipient or app.config.get("GOOGLE_CALENDAR_ACCESS") == "public":
+            abort(404)
+        google_email = normalize_email(request.form.get("google_email"))
+        if not valid_email(google_email) or len(google_email) > 254:
+            flash("Enter the Google email address you'll connect.", "error")
+            return redirect(url_for("account") + "#calendar-access-request")
+        if request.form.get("consent") != "yes":
+            flash("Tick the box to agree to share that Google email with the developer.", "error")
+            return redirect(url_for("account") + "#calendar-access-request")
+        now = utc_now()
+        record_id = db.calendar_access_requests.insert_one({
+            "account_id": account["_id"], "google_email": google_email, "consent_at": now,
+            "created_at": now, "expires_at": now + timedelta(days=180), "email_sent": False,
+        }).inserted_id
+        sent = send_email(
+            app, recipient=recipient, subject="[Group Planner] Google Calendar access request",
+            text=(f"{account.get('username', 'A user')} asked for Google Calendar access.\n\n"
+                  f"Google email to add as a test user: {google_email}\n"
+                  f"Requested: {now.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                  "Add it in Google Cloud Console > OAuth consent screen > Test users. "
+                  "They agreed to share this address with you."),
+            idempotency_key=f"calendar-access/{record_id}",
+        )
+        db.calendar_access_requests.update_one({"_id": record_id}, {"$set": {"email_sent": bool(sent)}})
+        if sent:
+            flash("Request sent. You'll be able to connect Google Calendar once the developer adds your Google email.", "success")
+        else:
+            flash("Your request was saved, but the email to the developer didn't go through. Please try again later.", "error")
+        return redirect(url_for("account"))
 
     @app.route("/account/delete", methods=["GET", "POST"])
     @login_required
