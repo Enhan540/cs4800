@@ -3005,7 +3005,7 @@ def create_app(database_override=None):
             return back
         db.users.update_one({"_id": member["_id"], "is_managed": True},
                             {"$set": {"display_name": name, "normalized_name": normalized, "updated_at": utc_now()}})
-        flash(f"Renamed to {name}.", "success")
+        flash(f"Name changed: {name}", "success")
         return back
 
     @app.post("/groups/<group_id>/demo/reset")
