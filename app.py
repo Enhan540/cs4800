@@ -59,6 +59,8 @@ ADMIN_PERMISSIONS = {
     "edit_member_rsvp",
     "manage_plans",
 }
+MANAGED_MEMBER_LIMIT = 30
+MANAGED_NAME_MAX = 60
 DEMO_GROUP_LIFETIME = timedelta(days=7)
 DEMO_GROUP_NAME = "Demo group"
 # Fixed fake schedules chosen so Smart Plan Finder shows exact, partial, and
@@ -382,7 +384,9 @@ def create_app(database_override=None):
             abort(403)
 
     def member_is_accessible(member):
-        if auth_bypass() or member.get("account_id") == current_account_id():
+        if auth_bypass():
+            return True
+        if member.get("account_id") == current_account_id() and not member.get("is_managed"):
             return True
         return bool(
             require_database().groups.find_one(
@@ -398,7 +402,14 @@ def create_app(database_override=None):
         )
 
     def member_can_manage(member):
-        if auth_bypass() or member.get("account_id") == current_account_id():
+        if auth_bypass():
+            return True
+        if member.get("is_managed"):
+            # Never "you created it": only current permissions in its own group count.
+            group = require_database().groups.find_one({"_id": member.get("managed_group_id"), "member_ids": member["_id"]})
+            return bool(group and group_is_accessible(group) and not demo_group_expired(group)
+                        and has_group_permission(group, "edit_member_availability"))
+        if member.get("account_id") == current_account_id():
             return True
         groups = require_database().groups.find({
             "$or": [
@@ -416,16 +427,20 @@ def create_app(database_override=None):
     def member_account_id(member):
         """Map a scheduling profile to the account whose data it represents.
 
-        Demo profiles belong to their creator for management only; they never
-        stand in for the creator's calendar, plans, or notifications.
+        Demo profiles and members without accounts belong to their creator for
+        bookkeeping only; they never stand in for the creator's calendar, plans,
+        or notifications.
         """
         if not member:
             return None
         if member.get("linked_account_id"):
             return member["linked_account_id"]
-        if member.get("is_demo"):
+        if has_no_login(member):
             return None
         return member.get("account_id")
+
+    def has_no_login(member):
+        return bool(member.get("is_demo") or member.get("is_managed"))
 
     def demo_group_expired(group):
         expires_at = aware_utc(group.get("demo_expires_at"))
@@ -433,6 +448,35 @@ def create_app(database_override=None):
 
     def real_groups_only(query):
         return {"$and": [query, {"is_demo": {"$ne": True}}]}
+
+    def managed_member_name(form):
+        name = " ".join(form.get("display_name", "").split())
+        if not name or len(name) > MANAGED_NAME_MAX or any(ord(ch) < 32 for ch in name):
+            return None
+        return name
+
+    def managed_normalized_name(group_id, name):
+        return f"managed:{group_id}:{name.casefold()}"
+
+    def get_managed_member(group, user_id):
+        member = require_database().users.find_one({
+            "_id": object_id(user_id), "is_managed": True, "managed_group_id": group["_id"],
+        })
+        if not member or member["_id"] not in group.get("member_ids", []):
+            abort(404)
+        return member
+
+    def delete_managed_member(db, group, member):
+        """Delete a member without an account and every trace of it in its group."""
+        member_id = member["_id"]
+        db.groups.update_one({"_id": group["_id"]}, {"$pull": {"member_ids": member_id}})
+        db.plans.update_many(
+            {"group_id": group["_id"]},
+            {"$pull": {"invited_member_ids": member_id, "scheduled_available_member_ids": member_id},
+             "$unset": {f"rsvps.{member_id}": ""}},
+        )
+        db.availability.delete_many({"user_id": member_id})
+        db.users.delete_one({"_id": member_id, "is_managed": True})
 
     def seed_demo_members(db, group_id, account_id):
         """Create the fake profiles and weekly availability for one demo group."""
@@ -768,7 +812,7 @@ def create_app(database_override=None):
             require_database().availability.find({"user_id": {"$in": member_ids}})
         )
         member_documents = list(
-            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1, "account_id": 1, "is_demo": 1})
+            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1, "account_id": 1, "is_demo": 1, "is_managed": 1})
         )
         account_by_member = {
             str(member["_id"]): member_account_id(member)
@@ -782,7 +826,7 @@ def create_app(database_override=None):
             account_member_documents = list(
                 require_database().users.find(
                     {"$or": [{"linked_account_id": {"$in": account_ids}}, {"account_id": {"$in": account_ids}}],
-                     "is_demo": {"$ne": True}},
+                     "is_demo": {"$ne": True}, "is_managed": {"$ne": True}},
                     {"_id": 1, "linked_account_id": 1, "account_id": 1},
                 )
             )
@@ -932,7 +976,8 @@ def create_app(database_override=None):
             return []
         account_members = list(
             db.users.find(
-                {"$or": [{"linked_account_id": account_id}, {"account_id": account_id}], "is_demo": {"$ne": True}},
+                {"$or": [{"linked_account_id": account_id}, {"account_id": account_id}],
+                 "is_demo": {"$ne": True}, "is_managed": {"$ne": True}},
                 {"_id": 1},
             )
         ) if account_id else []
@@ -2695,7 +2740,7 @@ def create_app(database_override=None):
             try:
                 sweep_expired_demo_groups(database, current_account_id())
                 group_query = real_groups_only(account_filter("account_ids"))
-                member_query = {**account_filter(), "is_demo": {"$ne": True}}
+                member_query = {**account_filter(), "is_demo": {"$ne": True}, "is_managed": {"$ne": True}}
                 group_ids = [
                     group["_id"] for group in database.groups.find(group_query, {"_id": 1})
                 ]
@@ -2809,7 +2854,7 @@ def create_app(database_override=None):
             if email:
                 duplicate_queries.append({"email": email})
             existing_member = db.users.find_one(
-                {**account_filter(), "is_demo": {"$ne": True}, "$or": duplicate_queries}
+                {**account_filter(), "is_demo": {"$ne": True}, "is_managed": {"$ne": True}, "$or": duplicate_queries}
             )
             if existing_member:
                 if origin_group:
@@ -2846,7 +2891,9 @@ def create_app(database_override=None):
                 flash(f"{display_name} was added.", "success")
             return redirect(url_for("users"))
 
-        member_list = list(db.users.find({**account_filter(), "is_demo": {"$ne": True}}).sort("display_name", ASCENDING))
+        member_list = list(db.users.find(
+            {**account_filter(), "is_demo": {"$ne": True}, "is_managed": {"$ne": True}}
+        ).sort("display_name", ASCENDING))
         return render_template("users.html", users=member_list, origin_group=origin_group)
 
     @app.get("/groups")
@@ -2898,6 +2945,68 @@ def create_app(database_override=None):
         db.groups.update_one({"_id": group_id}, {"$push": {"member_ids": {"$each": fake_ids}}})
         flash("Demo group created. The other members are fake, so try anything.", "success")
         return redirect(url_for("group_detail", group_id=group_id))
+
+    @app.post("/groups/<group_id>/managed-members")
+    @login_required
+    def create_managed_member(group_id):
+        db = require_database()
+        group = get_group(group_id)
+        if group.get("is_demo"):
+            abort(404)
+        require_group_permission(group, "manage_members")
+        name = managed_member_name(request.form)
+        back = redirect(url_for("group_detail", group_id=group["_id"]))
+        if not name:
+            flash(f"Enter a name of 1 to {MANAGED_NAME_MAX} characters.", "error")
+            return back
+        if db.users.count_documents({"is_managed": True, "managed_group_id": group["_id"]}) >= MANAGED_MEMBER_LIMIT:
+            flash(f"A group can have at most {MANAGED_MEMBER_LIMIT} members without accounts.", "error")
+            return back
+        normalized = managed_normalized_name(group["_id"], name)
+        if db.users.find_one({"is_managed": True, "managed_group_id": group["_id"], "normalized_name": normalized}, {"_id": 1}):
+            flash(f"{name} is already in this group.", "error")
+            return back
+        now = utc_now()
+        try:
+            member_id = db.users.insert_one({
+                "display_name": name,
+                "normalized_name": normalized,
+                "account_id": current_account_id(),
+                "created_by_account_id": current_account_id(),
+                "is_managed": True,
+                "managed_group_id": group["_id"],
+                "created_at": now,
+                "updated_at": now,
+            }).inserted_id
+        except DuplicateKeyError:
+            flash(f"{name} is already in this group.", "error")
+            return back
+        db.groups.update_one({"_id": group["_id"]}, {"$addToSet": {"member_ids": member_id}})
+        flash(f"{name} was added. You can now enter their availability.", "success")
+        return back
+
+    @app.post("/groups/<group_id>/managed-members/<user_id>/rename")
+    @login_required
+    def rename_managed_member(group_id, user_id):
+        db = require_database()
+        group = get_group(group_id)
+        require_group_permission(group, "manage_members")
+        member = get_managed_member(group, user_id)
+        name = managed_member_name(request.form)
+        back = redirect(url_for("group_detail", group_id=group["_id"]))
+        if not name:
+            flash(f"Enter a name of 1 to {MANAGED_NAME_MAX} characters.", "error")
+            return back
+        normalized = managed_normalized_name(group["_id"], name)
+        clash = db.users.find_one({"is_managed": True, "managed_group_id": group["_id"],
+                                   "normalized_name": normalized, "_id": {"$ne": member["_id"]}}, {"_id": 1})
+        if clash:
+            flash(f"{name} is already in this group.", "error")
+            return back
+        db.users.update_one({"_id": member["_id"], "is_managed": True},
+                            {"$set": {"display_name": name, "normalized_name": normalized, "updated_at": utc_now()}})
+        flash(f"Name changed: {name}", "success")
+        return back
 
     @app.post("/groups/<group_id>/demo/reset")
     @login_required
@@ -3134,6 +3243,9 @@ def create_app(database_override=None):
             can_invite=not group.get("is_demo") and (group_is_owner(group) or has_group_permission(group, "manage_members")),
             pending_invitees=pending_invitees,
             can_assign_roles=group_is_owner(group) and not group.get("is_demo"),
+            can_add_managed=not group.get("is_demo") and has_group_permission(group, "manage_members"),
+            managed_member_limit=MANAGED_MEMBER_LIMIT,
+            managed_name_max=MANAGED_NAME_MAX,
             permissions={
                 permission: has_group_permission(group, permission)
                 for permission in ADMIN_PERMISSIONS
@@ -3154,7 +3266,7 @@ def create_app(database_override=None):
         require_group_permission(group, "manage_members")
         member_id = object_id(request.form.get("user_id"))
         member = get_user(member_id)
-        if group.get("is_demo") or member.get("is_demo"):
+        if group.get("is_demo") or has_no_login(member):
             abort(404)
         if member_id in group.get("member_ids", []):
             flash("That member is already in the group.", "error")
@@ -3537,6 +3649,12 @@ def create_app(database_override=None):
         member = db.users.find_one({"_id": object_id(user_id)})
         if not member or member["_id"] not in group.get("member_ids", []):
             abort(404)
+        if member.get("is_managed"):
+            if member.get("managed_group_id") != group["_id"]:
+                abort(404)
+            delete_managed_member(db, group, member)
+            flash(f"{member['display_name']} was removed and their availability deleted.", "success")
+            return redirect(url_for("group_detail", group_id=group_id))
         if member.get("linked_account_id") == group.get("owner_account_id"):
             flash("The group owner cannot be removed.", "error")
         elif (
@@ -3564,7 +3682,12 @@ def create_app(database_override=None):
             clear_demo_group(db, group)
             flash("Demo group deleted.", "success")
             return redirect(url_for("groups"))
+        managed_ids = [item["_id"] for item in db.users.find(
+            {"is_managed": True, "managed_group_id": group["_id"]}, {"_id": 1}
+        )]
         db.plans.delete_many({"group_id": group["_id"]})
+        db.availability.delete_many({"user_id": {"$in": managed_ids}})
+        db.users.delete_many({"_id": {"$in": managed_ids}, "is_managed": True})
         db.groups.delete_one({"_id": group["_id"]})
         flash("Group deleted successfully.", "success")
         return redirect(url_for("groups"))
@@ -4001,7 +4124,7 @@ def create_app(database_override=None):
 
         participant_ids = plan_member_ids(plan, group)
         participants = list(db.users.find({"_id": {"$in": participant_ids}},
-                                          {"linked_account_id": 1, "account_id": 1, "is_demo": 1}))
+                                          {"linked_account_id": 1, "account_id": 1, "is_demo": 1, "is_managed": 1}))
         account_ids = [account_id for member in participants
                        if (account_id := member_account_id(member))]
         if db.calendar_connections.count_documents({"account_id": {"$in": account_ids}}):
@@ -4056,7 +4179,7 @@ def create_app(database_override=None):
             }},
         )
         for member_id in relevant_member_ids:
-            member = db.users.find_one({"_id": member_id}, {"linked_account_id": 1, "account_id": 1, "is_demo": 1})
+            member = db.users.find_one({"_id": member_id}, {"linked_account_id": 1, "account_id": 1, "is_demo": 1, "is_managed": 1})
             recipient_id = member_account_id(member)
             if recipient_id:
                 create_notification(
