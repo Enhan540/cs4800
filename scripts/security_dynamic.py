@@ -3,6 +3,7 @@
 import argparse
 from contextlib import closing
 import importlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -35,6 +36,27 @@ def free_port():
     with closing(socket.socket()) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def scan_bind_host():
+    """Return the one host address the synthetic app listens on during a scan.
+
+    Docker Desktop (Windows/macOS) forwards host.docker.internal to the host's
+    loopback, so loopback is enough there. On Linux, host-gateway resolves to the
+    default bridge gateway, so the app binds only to that private address; other
+    containers on that bridge can still reach it, but the local network cannot.
+    Never bind all interfaces.
+    """
+    if os.name == "nt" or sys.platform == "darwin":
+        return "127.0.0.1"
+    raw = docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}")
+    try:
+        address = ipaddress.ip_address(raw.decode().strip())
+    except ValueError:
+        raise RuntimeError("Disposable scanner network unavailable") from None
+    if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified:
+        raise RuntimeError("Disposable scanner network unavailable")
+    return str(address)
 
 
 def wait_until(function, timeout=120):
@@ -235,11 +257,12 @@ def main():
         def reject_feed(*_args, **_kwargs):
             raise ValueError("External feeds are disabled in the synthetic audit")
         module.fetch_calendar_url = reject_feed
-        server = make_server("0.0.0.0", 0, app, threaded=True, request_handler=QuietHandler)
+        bind_host = scan_bind_host()
+        server = make_server(bind_host, 0, app, threaded=True, request_handler=QuietHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         port = server.server_port
-        local = f"http://127.0.0.1:{port}"
+        local = f"http://{bind_host}:{port}"
         target = f"http://host.docker.internal:{port}"
         session = requests.Session()
         login_page = session.get(local + "/login", timeout=10)
@@ -254,7 +277,7 @@ def main():
         cookie = "; ".join(f"{key}={value}" for key, value in session.cookies.get_dict().items())
         key = secrets.token_hex(24)
         host_mapping = [] if os.name == "nt" else ["--add-host=host.docker.internal:host-gateway"]
-        docker("run", "--rm", "-d", "--name", zap_name, *host_mapping, IMAGES["zap"], "zap.sh", "-daemon", "-host", "0.0.0.0", "-port", "8080", "-config", f"api.key={key}", "-config", "api.addrs.addr.name=.*", "-config", "api.addrs.addr.regex=true")
+        docker("run", "--rm", "-d", "--name", zap_name, *host_mapping, IMAGES["zap"], "zap.sh", "-daemon", "-host", "127.0.0.1", "-port", "8080", "-config", f"api.key={key}", "-config", "api.addrs.addr.name=127.0.0.1", "-config", "api.addrs.addr.regex=false")
 
         def api(component, kind, action, **params):
             url = f"http://127.0.0.1:8080/JSON/{component}/{kind}/{action}/?" + urlencode({"apikey": key, **params})
