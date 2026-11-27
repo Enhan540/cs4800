@@ -44,7 +44,7 @@ def test_release_pins_checked_commit_and_verifies_live_alias(release_config):
     assert all(call[2].get("with_git") is True for call in client.calls if call[1].startswith("/v13/deployments/"))
 
 
-@pytest.mark.parametrize("field,value", [("id", "prj_other"), ("accountId", "team_other"), ("type", "gitlab"), ("repoId", "999"), ("productionBranch", "availability-overhaul")])
+@pytest.mark.parametrize("field,value", [("id", "prj_other"), ("accountId", "team_other"), ("type", "gitlab"), ("repoId", "999"), ("productionBranch", "feature-branch")])
 def test_wrong_project_owner_repository_or_branch_stops_before_creation(release_config, field, value):
     client = FakeClient(release_config)
     target = client.project if field in {"id", "accountId"} else client.project["link"]
@@ -54,7 +54,7 @@ def test_wrong_project_owner_repository_or_branch_stops_before_creation(release_
     assert not any(call[0] == "POST" for call in client.calls)
 
 
-@pytest.mark.parametrize("field,value", [("id", "dpl_other"), ("projectId", "prj_other"), ("target", "preview"), ("sha", "2" * 40), ("repoId", "999"), ("ref", "availability-overhaul"), ("type", "gitlab")])
+@pytest.mark.parametrize("field,value", [("id", "dpl_other"), ("projectId", "prj_other"), ("target", "preview"), ("sha", "2" * 40), ("repoId", "999"), ("ref", "feature-branch"), ("type", "gitlab")])
 def test_wrong_deployment_proof_never_reports_success(release_config, field, value, capsys):
     client = FakeClient(release_config)
     target = client.ready if field in {"id", "projectId", "target"} else client.ready["gitSource"]
