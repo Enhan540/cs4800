@@ -21,9 +21,9 @@ matrix with `python scripts/security_report.py`.
 Manual observations are read from the private `asvs-evidence.json` file and are
 bound to the reviewed branch commits. Missing or stale evidence stays unverified.
 
-The Security workflow runs on all pushes, pull requests to both active branches,
+The Security workflow runs on all pushes, pull requests to `main`,
 daily advisory checks, and a weekly full scan. Administrators must apply and verify
-`.security/branch-protection.json` on both branches; `security_admin.py --apply`
+`.security/branch-protection.json` on `main`; `security_admin.py --apply`
 uses an administrator `GITHUB_TOKEN`. Required check: `security (current)`.
 The check must come from the official GitHub Actions app, and the latest push
 requires a fresh approval. The helper reads settings back before reporting
@@ -143,7 +143,7 @@ These are intentionally outside the current MVP:
 - MongoDB Atlas with PyMongo.
 - `mongomock` and `pytest` for isolated tests.
 - Vercel for the hosted application, with production releases gated by GitHub Actions after environment setup.
-- GitHub Actions for security checks on every push and pull requests to both active branches.
+- GitHub Actions for security checks on every push and pull requests to `main`.
 - Gunicorn and AWS EC2 support are retained for a later/manual deployment path; EC2 is not the current automatic production deployment.
 
 ## Architecture
@@ -356,7 +356,7 @@ The committed `vercel.json` disables automatic Git deployments. Vercel project s
 
 ### GitHub Actions
 
-`.github/workflows/security.yml` runs the required security gate on every push, pull requests targeting either active branch, and manual runs. Scheduled checks cover both branches.
+`.github/workflows/security.yml` runs the required security gate on every push, pull requests targeting `main`, and manual runs. Scheduled checks cover `main`.
 
 `.github/workflows/release.yml` releases the exact main commit after its push-triggered Security workflow succeeds. Configure the production environment and branch protections before enabling releases. No EC2 deployment job runs from this repository.
 

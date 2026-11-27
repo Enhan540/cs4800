@@ -60,7 +60,7 @@ def test_incomplete_or_spoofed_branch_protection_cannot_verify(policy, weakness)
 
 
 @pytest.mark.parametrize("apply", [False, True])
-def test_admin_reads_back_both_branches_without_redirects(policy, monkeypatch, apply):
+def test_admin_reads_back_main_without_redirects(policy, monkeypatch, apply):
     calls = []
     class Session:
         def __init__(self):self.headers = {};self.trust_env = True
@@ -68,7 +68,7 @@ def test_admin_reads_back_both_branches_without_redirects(policy, monkeypatch, a
         def __exit__(self, *args):pass
         def request(self, method, url, **kwargs):
             calls.append((method, url, kwargs, dict(self.headers), self.trust_env))
-            assert url.startswith("https://api.github.com/repos/Enhan540/cs4800/branches/")
+            assert url.startswith("https://api.github.com/repos/Enhan540/cs4800/branches/main")
             if method == "PUT":
                 assert kwargs["json"] == policy
                 return Response({"acknowledged": True})
@@ -78,8 +78,8 @@ def test_admin_reads_back_both_branches_without_redirects(policy, monkeypatch, a
     monkeypatch.setenv("GITHUB_TOKEN", "synthetic-administrator-credential")
     monkeypatch.setattr(admin.requests, "Session", Session)
     assert admin.main(["--apply"] if apply else []) == 0
-    assert sum(call[0] == "PUT" for call in calls) == (2 if apply else 0)
-    assert sum(call[0] == "GET" for call in calls) == (6 if apply else 4)
+    assert sum(call[0] == "PUT" for call in calls) == (1 if apply else 0)
+    assert sum(call[0] == "GET" for call in calls) == (3 if apply else 2)
     assert all(call[2]["allow_redirects"] is False and call[4] is False for call in calls)
     assert all(call[3]["Content-Type"] == "application/json" for call in calls)
 

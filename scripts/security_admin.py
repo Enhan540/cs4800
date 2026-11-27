@@ -82,7 +82,7 @@ def main(argv=None):
     with requests.Session() as client:
         client.trust_env = False
         client.headers.update({"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": API_VERSION})
-        for branch in ("main", "availability-overhaul"):
+        for branch in ("main",):
             url = "https://api.github.com/repos/" + REPOSITORY + "/branches/" + quote(branch, safe="") + "/protection"
             def call(method, target, body=None):
                 return response_json(client.request(method, target, json=body, timeout=(3.05, 20), allow_redirects=False, stream=True))

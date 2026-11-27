@@ -76,7 +76,7 @@ def main():
     rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
     checklist = []
     branch_inventory = {}
-    for branch in ("main", "availability-overhaul"):
+    for branch in ("main",):
         app_source = source(branch, "app.py")
         tree = ast.parse(app_source)
         operations, collections, integrations, routes = [], set(), set(), []
@@ -125,7 +125,7 @@ def main():
     register["findings"] = list(unique.values())
     for item in register["findings"]:
         others = [candidate for candidate in register["findings"] if candidate.get("tool") == item.get("tool") and candidate.get("rule") == item.get("rule") and candidate.get("location", "").replace("\\", "/").removeprefix("/scan/") == item.get("location", "").replace("\\", "/").removeprefix("/scan/") and candidate.get("branch") != item.get("branch")]
-        item["classification"] = "shared candidate" if others else ("feature-only candidate; context review required" if item.get("branch") == "availability-overhaul" else "main-only candidate; context review required")
+        item["classification"] = "shared candidate" if others else "main-only candidate; context review required"
     report = {"at": now(), "branches": {branch: {"commit": item["commit"], "route_count": len(item["routes"])} for branch, item in branch_inventory.items()}, "coverage": topics, "coverage_evidence_current": coverage_current, "runs": register.get("runs", []), "findings": register.get("findings", []), "release_readiness": "unverified"}
     (home / "audit-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     document = '<!doctype html><meta charset="utf-8"><title>Private security audit</title><style>body{font:16px system-ui;max-width:1100px;margin:40px auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><h1>Private Group Planner security audit</h1><pre>' + html.escape(json.dumps(report, indent=2)) + '</pre>'
