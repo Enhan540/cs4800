@@ -31,12 +31,18 @@ def send_email(app, *, recipient, subject, text, idempotency_key=None):
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
-    response = requests.post(
-        "https://api.resend.com/emails",
-        headers=headers,
-        json={"from": from_email, "to": [recipient], "subject": subject, "text": text},
-        timeout=(3.05, 15),
-    )
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers=headers,
+            json={"from": from_email, "to": [recipient], "subject": subject, "text": text},
+            timeout=(3.05, 15),
+        )
+    except requests.RequestException as exc:
+        # An unreachable provider is a failed send, not a request error; callers already
+        # handle False. Log only the error type, never the payload or provider detail.
+        app.logger.error("Email provider request failed with error=%s", type(exc).__name__)
+        return False
     if not response.ok:
         app.logger.error("Email provider request failed with status=%s", response.status_code)
         return False
