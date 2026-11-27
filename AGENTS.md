@@ -78,7 +78,7 @@ RESEND_API_KEY=<Resend API key>
 FROM_EMAIL=<verified sender address>
 ```
 
-The Google redirect URLs must exactly match the Authorized redirect URIs in Google Cloud. Keep local and production values separate. Google sign-in and Google Calendar authorization are separate OAuth flows. Google Calendar now requests free/busy and read-only calendar-list scopes so users can select calendars; the new scope and live flow still need production consent and verification.
+The Google redirect URLs must exactly match the Authorized redirect URIs in Google Cloud. Keep local and production values separate. Google sign-in and Google Calendar authorization are separate OAuth flows. Google Calendar now requests free/busy and read-only calendar-list scopes so users can select calendars. Production consent for these scopes was verified on 2026-11-27 (see "Google Calendar production verification" below).
 
 ## Authentication state
 
@@ -135,13 +135,21 @@ Tokens are cryptographically random, only token hashes are stored, verification 
 - Authorization must be enforced server-side, not only in templates.
 - Preserve user/account IDs and existing MongoDB data.
 
-## Important deferred issue
+## Google Calendar production verification
 
-Google Calendar FreeBusy synchronization is implemented with short date chunks and selected calendar IDs. Its OAuth selection flow and selected secondary calendars still need a real Google account check after deployment; mocked tests do not prove production consent or permissions.
+Google Calendar FreeBusy synchronization uses short date chunks and selected calendar IDs. On 2026-11-27 the owner reconnected Google Calendar on production (groupplanner.vercel.app, `main` at 1b9e396) with a real Google account:
+
+- Google's consent flow granted the free/busy and calendar-list scopes.
+- The calendar-selection page listed the account's calendars, and a selected secondary calendar synced (21 busy periods for the next 30 days).
+- The "could not refresh" warning cleared on the availability and group pages.
+
+The previous connection had failed to sync since 2026-11-10, before this release. The likely cause is expired Google authorization: refresh tokens expire after 7 days while the OAuth consent screen is in Testing mode. That cause is not confirmed. If sync fails again about 7 days after a reconnect, publish the consent screen; Google may require verification for calendar scopes.
+
+Still unverified on production: Google sign-in from scratch, signup and password-reset email delivery, and authenticator enrollment.
 
 ## Test status at handoff
 
-The full suite last reported `204 passed, 78 mongomock deprecation warnings`. The new Google calendar-list scope and real secondary-calendar selection have not yet been verified against Google's production consent flow.
+The full suite last reported `204 passed, 78 mongomock deprecation warnings`.
 
 ## Working rules for the next agent
 
