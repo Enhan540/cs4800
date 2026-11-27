@@ -563,6 +563,15 @@
     "login_guard": true
   },
   {
+    "endpoint": "request_google_calendar_access",
+    "path": "/account/google-calendar-access",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
     "endpoint": "resend_verification_email",
     "path": "/account/email/resend",
     "methods": [

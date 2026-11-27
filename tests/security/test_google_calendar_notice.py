@@ -25,14 +25,21 @@ def test_notice_shows_by_default(secured, path):
         assert page.count(NOTICE) == 2  # the calendars section and the post-signup prompt
 
 
-def test_request_access_links_to_support_email_when_configured(secured):
+@pytest.mark.parametrize("setting", ["SUPPORT_EMAIL", "FEEDBACK_EMAIL"])
+def test_request_form_appears_without_revealing_the_developer_address(secured, setting):
     app, db, _ids, password = secured
-    app.config["SUPPORT_EMAIL"] = "support@example.invalid"
+    app.config[setting] = "developer-canary@example.invalid"
+    page = owner_client(app, db, password).get("/account?calendar_prompt=1").get_data(as_text=True)
+    assert "developer-canary@example.invalid" not in page and "mailto:" not in page
+    assert page.count('action="/account/google-calendar-access"') == 1  # one form; the prompt links to it
+    assert 'href="#calendar-access-request"' in page
+
+
+def test_without_a_developer_address_the_notice_asks_people_to_contact_the_developer(secured):
+    app, db, _ids, password = secured
+    app.config.update(SUPPORT_EMAIL="", FEEDBACK_EMAIL="")
     page = owner_client(app, db, password).get("/account").get_data(as_text=True)
-    assert 'href="mailto:support@example.invalid?subject=Google%20Calendar%20access%20request"' in page
-    app.config["SUPPORT_EMAIL"] = ""
-    page = owner_client(app, db, password).get("/account").get_data(as_text=True)
-    assert "mailto:" not in page and "Ask the developer to add the Google email" in page
+    assert "google-calendar-access" not in page and "Ask the developer to add the Google email" in page
 
 
 def test_public_mode_hides_the_notice(secured):
