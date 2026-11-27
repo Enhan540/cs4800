@@ -19,6 +19,59 @@ const calendarBusyLayout = (windows) => {
   return result;
 };
 
+// Merge [start, end) minute ranges; touching ranges join into one.
+const mergeMinuteRanges = (ranges) => ranges.map((range) => [...range])
+  .sort((a, b) => a[0] - b[0]).reduce((merged, range) => {
+    if (range[1] <= range[0]) return merged;
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push(range);
+    return merged;
+  }, []);
+
+// Set availability minus calendar busy time, as merged [start, end) ranges.
+const subtractMinuteRanges = (baseline, busy) => mergeMinuteRanges(busy).reduce(
+  (free, [start, end]) => free.flatMap(([left, right]) => (end <= left || start >= right
+    ? [[left, right]]
+    : [[left, Math.min(start, right)], [Math.max(end, left), right]].filter(([a, b]) => b > a))),
+  mergeMinuteRanges(baseline),
+);
+
+// Minutes of `free` that fall inside one set-availability window.
+const freeMinutesWithin = (start, end, free) => free.reduce(
+  (total, [left, right]) => total + Math.max(0, Math.min(end, right) - Math.max(start, left)), 0,
+);
+
+const freeSummaryText = (freeMinutes, totalMinutes) => {
+  if (totalMinutes <= 0) return "";
+  if (freeMinutes <= 0) return "No free time";
+  if (freeMinutes >= totalMinutes) return "All free";
+  const hours = Math.floor(freeMinutes / 60), minutes = freeMinutes % 60;
+  return `${hours ? `${hours}h` : ""}${hours && minutes ? " " : ""}${minutes ? `${minutes}m` : ""} free`;
+};
+
+// Place a popup below or above its anchor (then beside its container) without covering `avoid`.
+const choosePopupPosition = (anchor, size, viewport, avoid = null, container = null) => {
+  const gap = 6, margin = 8;
+  const clampLeft = (left) => Math.max(margin, Math.min(left, viewport.width - size.width - margin));
+  const clampTop = (top) => Math.max(margin, Math.min(top, viewport.height - size.height - margin));
+  const candidates = [
+    {left: clampLeft(anchor.left), top: anchor.bottom + gap},
+    {left: clampLeft(anchor.left), top: anchor.top - size.height - gap},
+  ];
+  if (container) {
+    candidates.push({left: container.right + gap, top: clampTop(anchor.top)});
+    candidates.push({left: container.left - size.width - gap, top: clampTop(anchor.top)});
+  }
+  const fits = ({left, top}) => left >= margin && top >= margin
+    && left + size.width <= viewport.width - margin && top + size.height <= viewport.height - margin;
+  const covers = ({left, top}) => Boolean(avoid) && left < avoid.right && left + size.width > avoid.left
+    && top < avoid.bottom && top + size.height > avoid.top;
+  return candidates.find((option) => fits(option) && !covers(option))
+    || candidates.find(fits)
+    || {left: clampLeft(anchor.left), top: clampTop(anchor.bottom + gap)};
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   const sidebar = document.querySelector("[data-app-sidebar]");
   const closeSidebar = () => document.body.classList.remove("sidebar-open");
@@ -407,7 +460,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   const formatTime = (minutes) => {
     const hour = Math.floor((minutes % 720) / 60) || 12;
-    return `${hour}:${String(minutes % 60).padStart(2, "0")} ${minutes >= 720 ? "P.M." : "A.M."}`;
+    return `${hour}:${String(minutes % 60).padStart(2, "0")} ${minutes >= 720 ? "PM" : "AM"}`;
   };
   const formatTypedTime = (value) => {
     const raw = String(value ?? "").trim().toUpperCase().replace(/[.\s]/g, "");
@@ -456,7 +509,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (suffix) {
       if (!minuteText) result = `${Number(hourText)}:00`;
       else if (minuteText.length === 1) result = `${Number(hourText)}:${minuteText}0`;
-      result += ` ${suffix === "PM" ? "P.M." : "A.M."}`;
+      result += ` ${suffix}`;
     }
     return result;
   };
@@ -487,11 +540,16 @@ document.addEventListener("DOMContentLoaded", () => {
     const bounds = input.getBoundingClientRect();
     dialog.hidden = false;
     dialog.style.width = `${Math.max(280, bounds.width)}px`;
-    dialog.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - dialog.offsetWidth - 8))}px`;
-    const spaceBelow = window.innerHeight - bounds.bottom;
-    dialog.style.top = spaceBelow >= dialog.offsetHeight + 12
-      ? `${bounds.bottom + 6}px`
-      : `${Math.max(8, bounds.top - dialog.offsetHeight - 6)}px`;
+    // Keep the form's submit button reachable while the picker is open.
+    const submit = input.form?.querySelector('[type="submit"]');
+    const container = input.closest("dialog, .card, form");
+    const position = choosePopupPosition(
+      bounds, {width: dialog.offsetWidth, height: dialog.offsetHeight},
+      {width: window.innerWidth, height: window.innerHeight},
+      submit?.getBoundingClientRect() || null, container?.getBoundingClientRect() || null,
+    );
+    dialog.style.left = `${position.left}px`;
+    dialog.style.top = `${position.top}px`;
   };
   const closePicker = (accept, restoreOriginal = true) => {
     if (!activeTimeInput || !dialog) return;
@@ -679,47 +737,77 @@ document.addEventListener("DOMContentLoaded", () => {
       "[data-availability-window], [data-availability-window-readonly]",
     )) : [];
   };
-  const mergeAvailabilityRanges = (ranges) => ranges.sort((a, b) => a[0] - b[0]).reduce((merged, range) => {
-    if (range[1] <= range[0]) return merged;
-    const last = merged[merged.length - 1];
-    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
-    else merged.push([...range]);
-    return merged;
-  }, []);
-  const chartTime = (minutes) => minutes === 1440 ? "12:00 A.M." : formatTime(minutes);
+  const chartTime = (minutes) => minutes === 1440 ? "12:00 AM" : formatTime(minutes);
+  // Matches the server-rendered chart labels, e.g. "Tuesday, November 24".
+  const chartDateLabel = (column) => {
+    const [year, month, day] = column.dataset.date.split("-").map(Number);
+    return new Date(year, month - 1, day).toLocaleDateString("en-US", {
+      weekday: "long", month: "long", day: "numeric",
+    });
+  };
+  const placeOnTrack = (element, start, end) => {
+    element.style.top = `${start / 1440 * 100}%`;
+    element.style.height = `${(end - start) / 1440 * 100}%`;
+  };
+  const windowRange = (block) => [
+    availabilityMinutes(block.dataset.startTime), availabilityMinutes(block.dataset.endTime),
+  ];
+  const effectiveRanges = (track) => Array.from(track.querySelectorAll("[data-effective-window]"))
+    .map((block) => [Number(block.dataset.startMinute), Number(block.dataset.endMinute)]);
+  const windowTag = (track, block) => track.querySelector(`[data-window-tag="${block.dataset.entryId}"]`);
+  // Each set window shows its time range and how much of it calendars leave free.
+  const updateFreeSummaries = (track) => {
+    const free = effectiveRanges(track);
+    track.querySelectorAll("[data-availability-window], [data-availability-window-readonly]").forEach((block) => {
+      const [start, end] = windowRange(block);
+      if (start === null || end === null) return;
+      const summary = freeSummaryText(freeMinutesWithin(start, end, free), end - start);
+      const range = `${chartTime(start)} to ${chartTime(end)}`;
+      const action = block.matches("[data-availability-window]") ? " View weekly availability." : "";
+      block.setAttribute("aria-label",
+        `Set availability on ${chartDateLabel(track.parentElement)}, ${range}. ${summary}.${action}`);
+      const note = windowTag(track, block)?.querySelector("[data-window-free]");
+      if (note) {
+        note.textContent = summary;
+        note.dataset.state = summary === "All free" ? "all" : summary === "No free time" ? "none" : "some";
+      }
+    });
+  };
   const refreshCombinedAvailability = (day) => {
     const column = availabilityColumnForDay(day);
     const track = column?.querySelector(".calendar-day-track");
     if (!track) return;
-    const baseline = mergeAvailabilityRanges(availabilityBlocksForDay(day).map((block) => [
-      availabilityMinutes(block.dataset.startTime), availabilityMinutes(block.dataset.endTime),
-    ]).filter(([start, end]) => start !== null && end !== null));
-    const busy = mergeAvailabilityRanges(Array.from(track.querySelectorAll("[data-calendar-mask]"))
-      .map((mask) => [Number(mask.dataset.startMinute), Number(mask.dataset.endMinute)]));
-    let free = baseline;
-    busy.forEach(([start, end]) => {
-      free = free.flatMap(([left, right]) => {
-        if (end <= left || start >= right) return [[left, right]];
-        return [[left, Math.min(start, right)], [Math.max(end, left), right]]
-          .filter(([a, b]) => b > a);
-      });
+    const baseline = availabilityBlocksForDay(day).map(windowRange)
+      .filter(([start, end]) => start !== null && end !== null);
+    const busy = Array.from(track.querySelectorAll("[data-calendar-mask]"))
+      .map((mask) => [Number(mask.dataset.startMinute), Number(mask.dataset.endMinute)]);
+    const free = subtractMinuteRanges(baseline, busy);
+    // Reuse existing segments so edits animate instead of flashing.
+    const existing = Array.from(track.querySelectorAll("[data-effective-window]"));
+    existing.slice(free.length).forEach((block) => block.remove());
+    free.forEach(([start, end], index) => {
+      let block = existing[index];
+      if (!block) {
+        block = document.createElement("span");
+        block.className = "calendar-effective-window is-entering";
+        block.dataset.effectiveWindow = "true";
+        block.setAttribute("role", "img");
+        track.appendChild(block);
+        requestAnimationFrame(() => requestAnimationFrame(() => block.classList.remove("is-entering")));
+      }
+      block.dataset.startMinute = String(start);
+      block.dataset.endMinute = String(end);
+      block.setAttribute("aria-label",
+        `Actually free on ${chartDateLabel(column)} from ${chartTime(start)} to ${chartTime(end)}`);
+      placeOnTrack(block, start, end);
     });
-    track.querySelectorAll("[data-effective-window]").forEach((block) => block.remove());
-    free.forEach(([start, end]) => {
-      const block = document.createElement("span");
-      block.className = "calendar-effective-window";
-      block.dataset.effectiveWindow = "true";
-      block.setAttribute("role", "img");
-      block.setAttribute("aria-label", `Actually free on ${column.dataset.date} from ${chartTime(start)} to ${chartTime(end)}`);
-      block.style.top = `${start / 1440 * 100}%`;
-      block.style.height = `${(end - start) / 1440 * 100}%`;
-      track.appendChild(block);
-    });
+    updateFreeSummaries(track);
+    layoutCalendarMasks();
   };
   const updateAvailabilityBlock = (entry) => {
     const track = availabilityColumnForDay(entry.day)?.querySelector(".calendar-day-track");
     if (!track) return null;
-    let block = track.querySelector(`[data-entry-id="${entry.id}"]`);
+    let block = track.querySelector(`[data-availability-window][data-entry-id="${entry.id}"]`);
     if (!block) {
       block = document.createElement("button");
       block.type = "button";
@@ -727,24 +815,34 @@ document.addEventListener("DOMContentLoaded", () => {
       block.dataset.availabilityWindow = "true";
       block.dataset.entryId = entry.id;
       block.setAttribute("aria-haspopup", "dialog");
-      const label = document.createElement("span");
-      label.className = "availability-window-label";
-      block.appendChild(label);
       track.appendChild(block);
+    }
+    let tag = windowTag(track, block);
+    if (!tag) {
+      tag = document.createElement("span");
+      tag.className = "availability-window-tag";
+      tag.dataset.windowTag = entry.id;
+      tag.setAttribute("aria-hidden", "true");
+      const time = document.createElement("strong");
+      time.dataset.windowTime = "true";
+      const note = document.createElement("small");
+      note.dataset.windowFree = "true";
+      tag.append(time, note);
+      track.appendChild(tag);
     }
     block.dataset.day = entry.day;
     block.dataset.startTime = entry.start_time;
     block.dataset.endTime = entry.end_time;
-    const start = availabilityMinutes(entry.start_time), end = availabilityMinutes(entry.end_time);
-    block.style.top = `${start / 1440 * 100}%`;
-    block.style.height = `${(end - start) / 1440 * 100}%`;
-    const label = `${availabilityTimeText(entry.start_time)} – ${availabilityTimeText(entry.end_time)}`;
-    block.querySelector(".availability-window-label").textContent = label;
+    const [start, end] = windowRange(block);
+    placeOnTrack(block, start, end);
+    placeOnTrack(tag, start, end);
+    const label = `${chartTime(start)} – ${chartTime(end)}`;
+    tag.querySelector("[data-window-time]").textContent = label;
     block.title = label;
-    block.setAttribute("aria-label", `Set availability on ${track.parentElement.dataset.date}, ${label}. View weekly availability.`);
     refreshCombinedAvailability(entry.day);
     return block;
   };
+  document.querySelectorAll(".weekly-calendar .calendar-day-track").forEach(updateFreeSummaries);
 
   const weeklyCalendar = document.querySelector(".weekly-calendar");
   const layoutCalendarMasks = () => {
@@ -755,6 +853,26 @@ document.addEventListener("DOMContentLoaded", () => {
       }))).forEach(({index, lane, lanes}) => {
         masks[index].style.left = `calc(${lane / lanes * 100}% + .18rem)`;
         masks[index].style.right = `calc(${(lanes - lane - 1) / lanes * 100}% + .18rem)`;
+      });
+      // Push busy text below any set-window label that would sit on top of it.
+      // Positions come from minutes, not offsets, so this is correct mid-animation.
+      const pixelsPerMinute = track.offsetHeight / 1440;
+      const tags = Array.from(track.querySelectorAll("[data-window-tag]")).map((tag) => {
+        const block = track.querySelector(`[data-entry-id="${tag.dataset.windowTag}"]`);
+        const [start, end] = block ? windowRange(block) : [null, null];
+        if (start === null || end === null) return null;
+        const top = start * pixelsPerMinute;
+        // Only the visible pills count, not the full-height tag box.
+        const pills = Array.from(tag.children).filter((pill) => pill.offsetHeight)
+          .reduce((bottom, pill) => Math.max(bottom, pill.offsetTop + pill.offsetHeight), 0);
+        return {top, bottom: top + Math.min(pills + 2, (end - start) * pixelsPerMinute)};
+      }).filter(Boolean);
+      masks.forEach((mask) => {
+        const top = Number(mask.dataset.startMinute) * pixelsPerMinute;
+        const clearance = tags.reduce((needed, tag) => (
+          tag.top <= top + 24 && tag.bottom > top ? Math.max(needed, tag.bottom - top) : needed
+        ), 0);
+        mask.style.setProperty("--tag-clearance", `${clearance}px`);
       });
     });
   };
@@ -1062,6 +1180,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setAvailabilitySaving(true);
     try {
       await availabilityRequest(action, body);
+      column.querySelector(`[data-window-tag="${block.dataset.entryId}"]`)?.remove();
       block.remove();
       refreshCombinedAvailability(column.dataset.day);
       availabilitySelection.focusTarget = column.querySelector(".calendar-day-track");

@@ -195,6 +195,28 @@ def test_busy_labels_and_checkboxes_identify_each_calendar(calendar_app):
     assert 'Set availability</span>' in page
 
 
+def test_set_window_label_is_layered_above_free_time_and_busy_blocks(calendar_app):
+    app, database = calendar_app
+    account, member, _group = planning_group(database)
+    database.calendar_connections.insert_one({
+        "account_id": account, "provider": "ical", "display_name": "Work",
+        "sync_status": "connected", "last_synced_at": datetime(2026, 11, 1, 20, tzinfo=timezone.utc),
+        "cache_start": datetime(2026, 11, 2, 8, tzinfo=timezone.utc),
+        "cache_end": datetime(2026, 11, 9, 8, tzinfo=timezone.utc),
+        "busy_intervals": [{"start": datetime(2026, 11, 2, 18), "end": datetime(2026, 11, 2, 19)}],
+    })
+    page = app.test_client().get(f"/users/{member}/availability?week_start=2026-11-02").get_data(as_text=True)
+    entry_id = database.availability.find_one({"user_id": member})["_id"]
+    # The time range lives in a separate, non-interactive tag drawn above other layers.
+    assert f'data-window-tag="{entry_id}" aria-hidden="true"' in page
+    assert '<strong data-window-time>9:00 AM – 12:00 PM</strong>' in page
+    assert 'class="availability-window-label"' not in page
+    # Free segments expose their minutes so the page can summarize each window.
+    assert 'data-effective-window data-start-minute="540" data-end-minute="600"' in page
+    assert 'data-effective-window data-start-minute="660" data-end-minute="720"' in page
+    assert 'calendar-legend-busy' in page
+
+
 def test_busy_block_labels_use_clipped_local_times_at_midnight(calendar_app):
     app, database = calendar_app
     account, member, _group = planning_group(database)
