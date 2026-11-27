@@ -59,6 +59,19 @@ ADMIN_PERMISSIONS = {
     "edit_member_rsvp",
     "manage_plans",
 }
+DEMO_GROUP_LIFETIME = timedelta(days=7)
+DEMO_GROUP_NAME = "Demo group"
+# Fixed fake schedules chosen so Smart Plan Finder shows exact, partial, and
+# shorter-than-requested results. Times use the app's five-minute precision.
+DEMO_MEMBERS = (
+    ("Alex", [(day, "17:00", "21:00") for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")]),
+    ("Jordan", [(day, "09:00", "13:00") for day in ("Monday", "Wednesday", "Friday")]
+     + [(day, "10:00", "18:00") for day in ("Saturday", "Sunday")]),
+    ("Sam", [(day, "12:00", "20:00") for day in ("Tuesday", "Thursday")] + [("Saturday", "09:00", "12:00")]),
+    ("Taylor", [(day, "11:00", "19:00") for day in ("Saturday", "Sunday")]),
+    ("Riley", [(day, "07:00", "10:00") for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")]
+     + [("Wednesday", "18:00", "20:00")]),
+)
 CALENDAR_FRESHNESS_SECONDS = {
     "view": 5 * 60,
     "scheduling": 60,
@@ -219,6 +232,12 @@ def create_app(database_override=None):
                 [("user_id", ASCENDING), ("day_order", ASCENDING), ("start_time", ASCENDING)]
             )
             database.groups.create_index("created_at")
+            database.groups.create_index(
+                [("owner_account_id", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"is_demo": True},
+                name="one_demo_group_per_owner",
+            )
             database.plans.create_index([("group_id", ASCENDING), ("created_at", DESCENDING)])
             database.group_invites.create_index(
                 [("group_id", ASCENDING), ("invited_user_id", ASCENDING)],
@@ -394,6 +413,77 @@ def create_app(database_override=None):
             for group in groups
         )
 
+    def member_account_id(member):
+        """Map a scheduling profile to the account whose data it represents.
+
+        Demo profiles belong to their creator for management only; they never
+        stand in for the creator's calendar, plans, or notifications.
+        """
+        if not member:
+            return None
+        if member.get("linked_account_id"):
+            return member["linked_account_id"]
+        if member.get("is_demo"):
+            return None
+        return member.get("account_id")
+
+    def demo_group_expired(group):
+        expires_at = aware_utc(group.get("demo_expires_at"))
+        return bool(group.get("is_demo")) and (expires_at is None or expires_at <= utc_now())
+
+    def real_groups_only(query):
+        return {"$and": [query, {"is_demo": {"$ne": True}}]}
+
+    def seed_demo_members(db, group_id, account_id):
+        """Create the fake profiles and weekly availability for one demo group."""
+        now = utc_now()
+        member_ids = []
+        for name, windows in DEMO_MEMBERS:
+            member_id = db.users.insert_one({
+                "display_name": f"{name} (demo)",
+                "normalized_name": f"demo:{group_id}:{name.casefold()}",
+                "account_id": account_id,
+                "is_demo": True,
+                "demo_group_id": group_id,
+                "created_at": now,
+                "updated_at": now,
+            }).inserted_id
+            member_ids.append(member_id)
+            rows = []
+            for day, start_time, end_time in windows:
+                values, error = validate_availability_values(day, start_time, end_time)
+                if error:
+                    raise ValueError(error)
+                rows.append({**values, "user_id": member_id, "created_at": now, "updated_at": now})
+            db.availability.insert_many(rows)
+        return member_ids
+
+    def clear_demo_group(db, group, delete_group=True):
+        """Remove a demo group's plans, notifications, and fake profiles."""
+        if not group.get("is_demo"):
+            raise ValueError("Only demo groups can be cleared")
+        fake_ids = [item["_id"] for item in db.users.find(
+            {"is_demo": True, "demo_group_id": group["_id"]}, {"_id": 1}
+        )]
+        db.plans.delete_many({"group_id": group["_id"]})
+        db.notifications.delete_many({"group_id": group["_id"]})
+        db.availability.delete_many({"user_id": {"$in": fake_ids}})
+        db.users.delete_many({"_id": {"$in": fake_ids}, "is_demo": True})
+        if delete_group:
+            db.groups.delete_one({"_id": group["_id"], "is_demo": True})
+
+    def sweep_expired_demo_groups(db, account_id):
+        """Clean up this account's expired demo data; access never depends on it."""
+        if not account_id:
+            return
+        for group in db.groups.find({"owner_account_id": account_id, "is_demo": True}).limit(5):
+            if demo_group_expired(group):
+                clear_demo_group(db, group)
+
+    def active_demo_group(db, account_id):
+        group = db.groups.find_one({"owner_account_id": account_id, "is_demo": True})
+        return group if group and not demo_group_expired(group) else None
+
     def get_user(user_id):
         user = require_database().users.find_one({"_id": object_id(user_id)})
         if not user or not member_is_accessible(user):
@@ -437,7 +527,7 @@ def create_app(database_override=None):
 
     def get_group(group_id):
         group = require_database().groups.find_one({"_id": object_id(group_id)})
-        if not group or not group_is_accessible(group):
+        if not group or not group_is_accessible(group) or demo_group_expired(group):
             abort(404)
         return group
 
@@ -446,7 +536,7 @@ def create_app(database_override=None):
         if not plan:
             abort(404)
         group = require_database().groups.find_one({"_id": plan.get("group_id")})
-        if not group or not group_is_accessible(group):
+        if not group or not group_is_accessible(group) or demo_group_expired(group):
             abort(404)
         return plan
 
@@ -678,10 +768,10 @@ def create_app(database_override=None):
             require_database().availability.find({"user_id": {"$in": member_ids}})
         )
         member_documents = list(
-            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1, "account_id": 1})
+            require_database().users.find({"_id": {"$in": member_ids}}, {"linked_account_id": 1, "account_id": 1, "is_demo": 1})
         )
         account_by_member = {
-            str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
+            str(member["_id"]): member_account_id(member)
             for member in member_documents
         }
         busy_intervals_by_member = calendar_busy_by_member(member_documents)
@@ -691,21 +781,24 @@ def create_app(database_override=None):
         if account_ids:
             account_member_documents = list(
                 require_database().users.find(
-                    {"$or": [{"linked_account_id": {"$in": account_ids}}, {"account_id": {"$in": account_ids}}]},
+                    {"$or": [{"linked_account_id": {"$in": account_ids}}, {"account_id": {"$in": account_ids}}],
+                     "is_demo": {"$ne": True}},
                     {"_id": 1, "linked_account_id": 1, "account_id": 1},
                 )
             )
             member_ids_by_account = {}
             for document in account_member_documents:
-                linked = document.get("linked_account_id") or document.get("account_id")
+                linked = member_account_id(document)
                 if linked:
                     member_ids_by_account.setdefault(linked, []).append(document["_id"])
             all_account_member_ids = [
                 member_id for ids in member_ids_by_account.values() for member_id in ids
             ]
+            committed_query = {"member_ids": {"$in": all_account_member_ids}}
+            # Practice plans never make a real person look busy in a real group.
             committed_group_ids = [
                 item["_id"] for item in require_database().groups.find(
-                    {"member_ids": {"$in": all_account_member_ids}}, {"_id": 1}
+                    committed_query if group.get("is_demo") else real_groups_only(committed_query), {"_id": 1}
                 )
             ]
             for scheduled_plan in require_database().plans.find({
@@ -834,17 +927,20 @@ def create_app(database_override=None):
         member = db.users.find_one({"_id": member_id})
         if not member:
             return []
-        account_id = member.get("linked_account_id") or member.get("account_id")
+        account_id = member_account_id(member)
         if not account_id and not auth_bypass():
             return []
         account_members = list(
             db.users.find(
-                {"$or": [{"linked_account_id": account_id}, {"account_id": account_id}]},
+                {"$or": [{"linked_account_id": account_id}, {"account_id": account_id}], "is_demo": {"$ne": True}},
                 {"_id": 1},
             )
         ) if account_id else []
         account_member_ids = [item["_id"] for item in account_members]
         group_query = {"member_ids": {"$in": account_member_ids}}
+        plan_group = db.groups.find_one({"_id": plan.get("group_id")}, {"is_demo": 1}) or {}
+        if not plan_group.get("is_demo"):
+            group_query = real_groups_only(group_query)
         if not auth_bypass():
             group_query = {
                 "$and": [
@@ -2597,8 +2693,9 @@ def create_app(database_override=None):
         stats = {"groups": 0, "members": 0, "plans": 0}
         if database is not None:
             try:
-                group_query = account_filter("account_ids")
-                member_query = account_filter()
+                sweep_expired_demo_groups(database, current_account_id())
+                group_query = real_groups_only(account_filter("account_ids"))
+                member_query = {**account_filter(), "is_demo": {"$ne": True}}
                 group_ids = [
                     group["_id"] for group in database.groups.find(group_query, {"_id": 1})
                 ]
@@ -2698,6 +2795,8 @@ def create_app(database_override=None):
             # for old unlinked migration records; authenticated accounts use invites.
             if request.method == "GET":
                 return redirect(url_for("group_detail", group_id=origin_group["_id"]))
+            if origin_group.get("is_demo"):
+                abort(404)
             require_group_permission(origin_group, "manage_members")
         if request.method == "POST":
             display_name = request.form.get("display_name", "").strip()
@@ -2710,7 +2809,7 @@ def create_app(database_override=None):
             if email:
                 duplicate_queries.append({"email": email})
             existing_member = db.users.find_one(
-                {**account_filter(), "$or": duplicate_queries}
+                {**account_filter(), "is_demo": {"$ne": True}, "$or": duplicate_queries}
             )
             if existing_member:
                 if origin_group:
@@ -2747,18 +2846,76 @@ def create_app(database_override=None):
                 flash(f"{display_name} was added.", "success")
             return redirect(url_for("users"))
 
-        member_list = list(db.users.find(account_filter()).sort("display_name", ASCENDING))
+        member_list = list(db.users.find({**account_filter(), "is_demo": {"$ne": True}}).sort("display_name", ASCENDING))
         return render_template("users.html", users=member_list, origin_group=origin_group)
 
     @app.get("/groups")
     @login_required
     def groups():
-        group_list = list(
-            require_database().groups.find(account_filter("account_ids")).sort(
-                "created_at", DESCENDING
-            )
+        db = require_database()
+        sweep_expired_demo_groups(db, current_account_id())
+        group_list = [
+            group for group in db.groups.find(account_filter("account_ids")).sort("created_at", DESCENDING)
+            if not demo_group_expired(group)
+        ]
+        return render_template(
+            "groups.html", groups=group_list,
+            has_demo_group=any(group.get("is_demo") for group in group_list),
         )
-        return render_template("groups.html", groups=group_list)
+
+    @app.post("/groups/demo")
+    @login_required
+    def create_demo_group():
+        account_id = current_account_id()
+        if auth_bypass() or not account_id:
+            abort(404)
+        db = require_database()
+        sweep_expired_demo_groups(db, account_id)
+        existing = active_demo_group(db, account_id)
+        if existing:
+            flash("You already have a demo group.", "success")
+            return redirect(url_for("group_detail", group_id=existing["_id"]))
+        owner_member = ensure_account_member()
+        now = utc_now()
+        try:
+            group_id = db.groups.insert_one({
+                "name": DEMO_GROUP_NAME,
+                "description": "Practice planning with fake members. Nothing here is shared.",
+                "is_demo": True,
+                "demo_expires_at": now + DEMO_GROUP_LIFETIME,
+                "owner_account_id": account_id,
+                "account_ids": [account_id],
+                "account_roles": {str(account_id): "owner"},
+                "member_ids": [owner_member["_id"]],
+                "created_at": now,
+            }).inserted_id
+        except DuplicateKeyError:
+            existing = active_demo_group(db, account_id)
+            if not existing:
+                abort(409)
+            return redirect(url_for("group_detail", group_id=existing["_id"]))
+        fake_ids = seed_demo_members(db, group_id, account_id)
+        db.groups.update_one({"_id": group_id}, {"$push": {"member_ids": {"$each": fake_ids}}})
+        flash("Demo group created. The other members are fake, so try anything.", "success")
+        return redirect(url_for("group_detail", group_id=group_id))
+
+    @app.post("/groups/<group_id>/demo/reset")
+    @login_required
+    def reset_demo_group(group_id):
+        db = require_database()
+        group = get_group(group_id)
+        if not group.get("is_demo"):
+            abort(404)
+        require_group_owner(group)
+        clear_demo_group(db, group, delete_group=False)
+        owner_member = ensure_account_member()
+        fake_ids = seed_demo_members(db, group["_id"], current_account_id())
+        db.groups.update_one(
+            {"_id": group["_id"], "is_demo": True},
+            {"$set": {"member_ids": [owner_member["_id"], *fake_ids]}},
+        )
+        flash("Demo group reset. Its plans were removed and the fake members restored.", "success")
+        return redirect(url_for("group_detail", group_id=group["_id"]))
 
     @app.get("/members")
     @login_required
@@ -2855,14 +3012,15 @@ def create_app(database_override=None):
             end_date=week_dates[-1].isoformat(),
         )
         account_by_member = {
-            str(member["_id"]): member.get("linked_account_id") or member.get("account_id")
+            str(member["_id"]): member_account_id(member)
             for member in members
         }
         busy_by_member = calendar_busy_by_member(members)
         plan_conflicts = {str(member["_id"]): [] for member in members}
+        member_group_query = {"member_ids": {"$in": member_ids}}
         member_group_ids = [
             item["_id"] for item in db.groups.find(
-                {"member_ids": {"$in": member_ids}}, {"_id": 1}
+                member_group_query if group.get("is_demo") else real_groups_only(member_group_query), {"_id": 1}
             )
         ]
         for scheduled_plan in db.plans.find({"group_id": {"$in": member_group_ids}, "status": "scheduled"}):
@@ -2973,9 +3131,9 @@ def create_app(database_override=None):
             planning_plans=planning_plans,
             upcoming_plan_count=len(scheduled_plans),
             can_manage_group=group_is_owner(group),
-            can_invite=group_is_owner(group) or has_group_permission(group, "manage_members"),
+            can_invite=not group.get("is_demo") and (group_is_owner(group) or has_group_permission(group, "manage_members")),
             pending_invitees=pending_invitees,
-            can_assign_roles=group_is_owner(group),
+            can_assign_roles=group_is_owner(group) and not group.get("is_demo"),
             permissions={
                 permission: has_group_permission(group, permission)
                 for permission in ADMIN_PERMISSIONS
@@ -2996,6 +3154,8 @@ def create_app(database_override=None):
         require_group_permission(group, "manage_members")
         member_id = object_id(request.form.get("user_id"))
         member = get_user(member_id)
+        if group.get("is_demo") or member.get("is_demo"):
+            abort(404)
         if member_id in group.get("member_ids", []):
             flash("That member is already in the group.", "error")
         elif member.get("linked_account_id"):
@@ -3012,6 +3172,8 @@ def create_app(database_override=None):
     def search_group_invitation_accounts(group_id):
         db = require_database()
         group = get_group(group_id)
+        if group.get("is_demo"):
+            abort(404)
         require_group_permission(group, "manage_members")
         query = request.args.get("q", "").strip()
         if len(query) < 2:
@@ -3053,6 +3215,8 @@ def create_app(database_override=None):
     def invite_group_account(group_id):
         db = require_database()
         group = get_group(group_id)
+        if group.get("is_demo"):
+            abort(404)
         require_group_permission(group, "manage_members")
         username = request.form.get("username", "").strip()
         account = db.accounts.find_one({"normalized_username": username.casefold()})
@@ -3338,6 +3502,8 @@ def create_app(database_override=None):
     def update_group_member_role(group_id, user_id):
         db = require_database()
         group = get_group(group_id)
+        if group.get("is_demo"):
+            abort(404)
         require_group_owner(group)
         member = db.users.find_one({"_id": object_id(user_id)})
         if not member or member["_id"] not in group.get("member_ids", []):
@@ -3394,6 +3560,10 @@ def create_app(database_override=None):
         db = require_database()
         group = get_group(group_id)
         require_group_owner(group)
+        if group.get("is_demo"):
+            clear_demo_group(db, group)
+            flash("Demo group deleted.", "success")
+            return redirect(url_for("groups"))
         db.plans.delete_many({"group_id": group["_id"]})
         db.groups.delete_one({"_id": group["_id"]})
         flash("Group deleted successfully.", "success")
@@ -3831,9 +4001,9 @@ def create_app(database_override=None):
 
         participant_ids = plan_member_ids(plan, group)
         participants = list(db.users.find({"_id": {"$in": participant_ids}},
-                                          {"linked_account_id": 1, "account_id": 1}))
+                                          {"linked_account_id": 1, "account_id": 1, "is_demo": 1}))
         account_ids = [account_id for member in participants
-                       if (account_id := member.get("linked_account_id") or member.get("account_id"))]
+                       if (account_id := member_account_id(member))]
         if db.calendar_connections.count_documents({"account_id": {"$in": account_ids}}):
             try:
                 current_matches = calculate_matches(group, plan, exclude_plan_id=plan["_id"])
@@ -3886,8 +4056,8 @@ def create_app(database_override=None):
             }},
         )
         for member_id in relevant_member_ids:
-            member = db.users.find_one({"_id": member_id}, {"linked_account_id": 1, "account_id": 1})
-            recipient_id = (member or {}).get("linked_account_id") or (member or {}).get("account_id")
+            member = db.users.find_one({"_id": member_id}, {"linked_account_id": 1, "account_id": 1, "is_demo": 1})
+            recipient_id = member_account_id(member)
             if recipient_id:
                 create_notification(
                     db,
