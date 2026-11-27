@@ -120,6 +120,15 @@
     "login_guard": true
   },
   {
+    "endpoint": "create_managed_member",
+    "path": "/groups/<group_id>/managed-members",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
     "endpoint": "create_plan",
     "path": "/groups/<group_id>/plans/create",
     "methods": [
@@ -528,6 +537,15 @@
   {
     "endpoint": "remove_group_member",
     "path": "/groups/<group_id>/members/<user_id>/remove",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "rename_managed_member",
+    "path": "/groups/<group_id>/managed-members/<user_id>/rename",
     "methods": [
       "POST"
     ],

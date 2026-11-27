@@ -29,6 +29,8 @@ OPERATIONS = [
     Operation("edit_group", "edit_group", "GET"),
     Operation("edit_group", "edit_group"),
     Operation("add_group_member", "manage_members"),
+    Operation("create_managed_member", "manage_members"),
+    Operation("rename_managed_member", "manage_members"),
     Operation("search_group_invitation_accounts", "manage_members", "GET"),
     Operation("invite_group_account", "manage_members"),
     Operation("retract_group_invitation", "manage_members"),
@@ -65,9 +67,16 @@ def prepare_operation(db, ids, actor, operation):
     db.plans.update_one({"_id": ids["plan"]}, {"$set": {"earliest_time": "09:00", "latest_time": "17:00", "matches": [match]}})
     if operation.endpoint in {"update_rsvp", "invite_plan_member"}:
         db.plans.update_one({"_id": ids["plan"]}, {"$set": {"status": "scheduled", "scheduled_start": datetime(2027, 1, 4, 9), "scheduled_end": datetime(2027, 1, 4, 9, 30)}})
+    if operation.endpoint == "rename_managed_member":
+        managed = ObjectId()
+        db.users.insert_one({"_id": managed, "display_name": "Synthetic managed member", "normalized_name": f"managed:{ids['group']}:synthetic managed member",
+                             "account_id": ids["owner"], "is_managed": True, "managed_group_id": ids["group"]})
+        db.groups.update_one({"_id": ids["group"]}, {"$addToSet": {"member_ids": managed}})
     row = next(row for row in ROUTES if row["endpoint"] == operation.endpoint)
     path = row["path"]
     replacements = {"group_id": ids["group"], "plan_id": ids["plan"], "user_id": ids["member"], "availability_id": ids["window"], "invitation_id": ids["invite"]}
+    if operation.endpoint == "rename_managed_member":
+        replacements["user_id"] = db.users.find_one({"is_managed": True, "managed_group_id": ids["group"]})["_id"]
     for field, value in replacements.items():
         path = path.replace("<" + field + ">", str(value))
     data = {"owner_account_id": str(ids["outsider"]), "account_ids": [str(ids["outsider"])], "admin_permissions": json.dumps({str(ids["outsider"]): list(ADMIN_PERMISSIONS)}), "group_id": str(ids["group"])}
@@ -76,6 +85,7 @@ def prepare_operation(db, ids, actor, operation):
     if endpoint == "users":data.update(display_name="Permission-created legacy profile")
     elif endpoint == "edit_group":data.update(name="Permission-controlled group", description="Synthetic description")
     elif endpoint == "add_group_member":data.update(user_id=str(legacy))
+    elif endpoint in {"create_managed_member", "rename_managed_member"}:data.update(display_name="Permission-named member")
     elif endpoint == "invite_group_account":data.update(username="audit-outsider", account_id=str(ids["owner"]))
     elif endpoint == "update_group_member_role":data.update(role="admin", permissions=["edit_group", "unknown-permission"])
     elif endpoint == "member_availability":data.update(day="Tuesday", start_time="12:00", end_time="13:00")
@@ -106,6 +116,10 @@ def assert_authorized_effect(db, ids, actor, operation, response, legacy):
         assert group["name"] == "Permission-controlled group" and group["owner_account_id"] == ids["owner"]
         assert ids["outsider"] not in group["account_ids"]
     elif endpoint == "add_group_member":assert legacy in group["member_ids"]
+    elif endpoint in {"create_managed_member", "rename_managed_member"}:
+        record = db.users.find_one({"is_managed": True, "managed_group_id": ids["group"], "display_name": "Permission-named member"})
+        assert record and record["_id"] in group["member_ids"] and "linked_account_id" not in record
+        assert ids["outsider"] not in group["account_ids"] and db.accounts.count_documents({}) == 4
     elif endpoint == "invite_group_account":
         assert db.group_invites.find_one({"invited_user_id": ids["outsider"], "group_id": ids["group"], "status": "pending"})
         assert ids["outsider"] not in group["account_ids"]
