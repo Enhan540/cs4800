@@ -4,13 +4,13 @@
 <a class="back-link" href="{{ url_for('dashboard') }}">← Back to Dashboard</a>
 <section class="page-heading with-back-link">
   <div><p class="eyebrow">Recurring groups</p><h1>Groups</h1><p class="muted">Keep everyone’s weekly availability and plans in one place.</p></div>
-  <a class="button" href="{{ url_for('create_group') }}">+ Create Group</a>
+  <div class="button-row heading-actions">{% if groups and not has_demo_group %}<form method="post" action="{{ url_for('create_demo_group') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button secondary" type="submit">Try a demo group</button></form>{% endif %}<a class="button" href="{{ url_for('create_group') }}">+ Create Group</a></div>
 </section>
 {% if groups %}
   <div class="card-grid">
     {% for group in groups %}
       <a class="card group-card clickable-card" href="{{ url_for('group_detail', group_id=group._id) }}">
-        <span class="pill">{{ group.member_ids|length }} members</span>
+        <span class="pill">{{ group.member_ids|length }} members</span>{% if group.is_demo %} <span class="pill demo-pill">Demo</span>{% endif %}
         <h2>{{ group.name }}</h2>
         <p class="muted">{{ group.description or 'No description added.' }}</p>
         <span class="text-link">Open group →</span>
@@ -18,6 +18,6 @@
     {% endfor %}
   </div>
 {% else %}
-  <section class="card empty-state"><h2>No groups yet</h2><p class="muted">Create your first recurring group to begin.</p><a class="button" href="{{ url_for('create_group') }}">Create Group</a></section>
+  <section class="card empty-state"><h2>No groups yet</h2><p class="muted">Create your first recurring group to begin, or try a demo group with fake members first.</p><div class="button-row"><a class="button" href="{{ url_for('create_group') }}">Create Group</a><form method="post" action="{{ url_for('create_demo_group') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button secondary" type="submit">Try a demo group</button></form></div></section>
 {% endif %}
 {% endblock %}

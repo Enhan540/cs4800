@@ -101,6 +101,15 @@
     "login_guard": true
   },
   {
+    "endpoint": "create_demo_group",
+    "path": "/groups/demo",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
     "endpoint": "create_group",
     "path": "/groups/create",
     "methods": [
@@ -528,6 +537,15 @@
   {
     "endpoint": "resend_verification_email",
     "path": "/account/email/resend",
+    "methods": [
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
+    "endpoint": "reset_demo_group",
+    "path": "/groups/<group_id>/demo/reset",
     "methods": [
       "POST"
     ],

@@ -35,6 +35,7 @@ OPERATIONS = [
     Operation("update_group_member_role", None),
     Operation("remove_group_member", "manage_members"),
     Operation("delete_group", None),
+    Operation("reset_demo_group", None),
     Operation("member_availability", "edit_member_availability", "GET"),
     Operation("member_availability", "edit_member_availability"),
     Operation("bulk_edit_availability", "edit_member_availability"),
@@ -118,6 +119,11 @@ def assert_authorized_effect(db, ids, actor, operation, response, legacy):
     elif endpoint == "delete_group":
         assert group is None and db.plans.count_documents({"group_id": ids["group"]}) == 0
         assert db.accounts.count_documents({}) == 4
+    elif endpoint == "reset_demo_group":
+        fakes = list(db.users.find({"is_demo": True, "demo_group_id": ids["group"]}))
+        assert len(fakes) == 5 and all(fake["_id"] in group["member_ids"] and "linked_account_id" not in fake for fake in fakes)
+        assert db.plans.count_documents({"group_id": ids["group"]}) == 0
+        assert db.accounts.count_documents({}) == 4
     elif endpoint == "member_availability":assert db.availability.find_one({"user_id": ids["member"], "day": "Tuesday", "start_time": "12:00"})
     elif endpoint in {"bulk_edit_availability", "edit_availability"}:assert db.availability.find_one({"_id": ids["window"]})["start_time"] == "10:00"
     elif endpoint == "delete_availability":assert db.availability.find_one({"_id": ids["window"]}) is None
@@ -157,6 +163,9 @@ def test_group_capabilities_are_individual_and_rechecked_after_revocation(secure
             change_path = f"/groups/{ids['group']}/members/{ids['admin']}/remove"
             change_data = {}
         assert owner.post(change_path, data=change_data, headers={"X-CSRF-Token": owner_proof}).status_code == 302
+    if operation.endpoint == "reset_demo_group":
+        # Reset exists only for demo groups; the same membership states apply.
+        db.groups.update_one({"_id": ids["group"]}, {"$set": {"is_demo": True, "demo_expires_at": datetime(2099, 1, 1)}})
     before = copy.deepcopy(snapshot(db))
     accounts_before = list(db.accounts.find({}))
     response = client.open(path, method=operation.method, data=data if operation.method == "POST" else None, query_string={"q": "audit"} if operation.method == "GET" else None, headers={"X-CSRF-Token": proof})
