@@ -157,6 +157,16 @@
     "login_guard": true
   },
   {
+    "endpoint": "delete_account",
+    "path": "/account/delete",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "authenticated",
+    "login_guard": true
+  },
+  {
     "endpoint": "delete_availability",
     "path": "/availability/<availability_id>/delete",
     "methods": [

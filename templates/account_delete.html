@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "partials/mfa_fields.html" import verification_code, password_confirmation %}
+{% block title %}Delete account | Group Planner{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('account') }}">← Back to Account</a>
+<section class="card account-section account-delete">
+  <p class="eyebrow">Danger zone</p>
+  <h1>Delete your account</h1>
+  <p>This permanently deletes <strong>{{ account.username }}</strong> and can't be undone.</p>
+  <ul class="delete-summary">
+    <li>Your sign-in, email, authenticator, saved availability and connected calendars are deleted.</li>
+    <li>You leave every group you're in, and your RSVPs are removed from their plans.</li>
+    {% if plan.deleted %}<li>These groups you own are deleted, with their plans: {% for group in plan.deleted %}<strong>{{ group.name }}</strong>{% if not loop.last %}, {% endif %}{% endfor %}.</li>{% endif %}
+    <li>Calendar access you gave Google isn't revoked here; you can remove it in your Google Account under Security → Third-party connections.</li>
+  </ul>
+  {% if plan.blocking %}
+    <p class="delete-blocked" role="alert"><strong>You can't delete your account yet.</strong> You own groups that other people belong to. Delete them first, so their members aren't left without an owner:</p>
+    <ul>{% for group in plan.blocking %}<li><a href="{{ url_for('group_detail', group_id=group._id) }}">{{ group.name }}</a></li>{% endfor %}</ul>
+  {% else %}
+    <form method="post" class="auth-form compact-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="confirm-username">Type your username, <strong>{{ account.username }}</strong>, to confirm<input id="confirm-username" name="confirm_username" autocomplete="off" spellcheck="false" required></label>
+      {{ password_confirmation(has_password) }}
+      {% if mfa_enabled %}{{ verification_code() }}{% endif %}
+      <label class="permission-row"><input type="checkbox" name="confirm_permanent" value="yes" required> <span>I understand this permanently deletes my account and can't be undone.</span></label>
+      <div class="button-row"><a class="button secondary" href="{{ url_for('account') }}">Cancel</a><button class="button danger" type="submit">Delete My Account</button></div>
+    </form>
+  {% endif %}
+</section>
+{% endblock %}
