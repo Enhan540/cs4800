@@ -259,6 +259,25 @@
     "login_guard": true
   },
   {
+    "endpoint": "feedback",
+    "path": "/feedback",
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
+    "endpoint": "feedback_thanks",
+    "path": "/feedback/thanks",
+    "methods": [
+      "GET"
+    ],
+    "access": "public",
+    "login_guard": false
+  },
+  {
     "endpoint": "find_plan_times",
     "path": "/plans/<plan_id>/find-times",
     "methods": [
