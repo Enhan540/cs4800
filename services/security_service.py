@@ -166,6 +166,10 @@ def init_security(app, database):
                 throttle(f"auth-ip:{request.remote_addr}", 120, 900)
                 identity = request.form.get("username") or request.form.get("email") or ""
                 throttle(f"auth-identity:{request.endpoint}:{identity.strip().casefold()}", 20, 900)
+            if request.method == "POST" and request.endpoint == "feedback":
+                throttle(f"feedback-ip:{request.remote_addr}", 5, 3600)
+                if current_user.is_authenticated:
+                    throttle(f"feedback-account:{current_user.id}", 20, 86400)
             if current_user.is_authenticated and request.method == "POST" and request.endpoint == "request_google_calendar_access":
                 throttle(f"calendar-access-request:{current_user.id}", 3, 86400)
             if current_user.is_authenticated and request.method == "POST" and request.endpoint in {"create_managed_member", "rename_managed_member"}:

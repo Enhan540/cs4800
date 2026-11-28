@@ -42,6 +42,7 @@ from services.notification_service import (
     unread_count,
 )
 from services.email_service import send_email, send_password_reset_email, send_verification_email
+from services import feedback_service
 from services import mfa_service as mfa
 from services import security_alert_service as security_alerts
 from services.password_policy import legacy_password_setup_pending, legacy_setup_expired, legacy_setup_proof, password_error, retired_bootstrap_password
@@ -242,6 +243,8 @@ def create_app(database_override=None):
             )
             database.groups.create_index("created_at")
             database.calendar_access_requests.create_index("expires_at", expireAfterSeconds=0)
+            database.feedback.create_index("expires_at", expireAfterSeconds=0)
+            database.feedback.create_index("created_at")
             database.groups.create_index(
                 [("owner_account_id", ASCENDING)],
                 unique=True,
@@ -2484,6 +2487,68 @@ def create_app(database_override=None):
                      "google_link_states", "security_sessions"):
             db[name].delete_many({"account_id": account_id})
         db.accounts.delete_one({"_id": account_id})
+
+    FEEDBACK_EMAILS_PER_HOUR = 30
+
+    def feedback_page_name(value):
+        """Record only a page name we serve, never an address (some carry tokens or IDs)."""
+        name = str(value or "")
+        return name if name in app.view_functions and name != "static" else None
+
+    def feedback_email_allowed(db):
+        bucket = int(time.time()) // 3600
+        key = hashlib.sha256(f"feedback-email:{bucket}".encode()).hexdigest()
+        record = db.security_rate_limits.find_one_and_update(
+            {"_id": key}, {"$inc": {"count": 1}, "$setOnInsert": {"expires_at": utc_now() + timedelta(hours=2)}},
+            upsert=True, return_document=ReturnDocument.AFTER,
+        )
+        return record["count"] <= FEEDBACK_EMAILS_PER_HOUR
+
+    @app.route("/feedback", methods=["GET", "POST"])
+    def feedback():
+        # Public on purpose: bug reports must work when someone can't sign in.
+        db = require_database()
+        account = db.accounts.find_one({"_id": current_account_id()}) if current_user.is_authenticated else None
+        account_email = (account or {}).get("email") if (account or {}).get("email_verified") else None
+        if request.method == "GET":
+            kind = request.args.get("type", "bug")
+            return render_template(
+                "feedback.html", form={"type": kind if kind in feedback_service.TYPES else "bug"},
+                types=feedback_service.TYPES, page=feedback_page_name(request.args.get("from")),
+                account_email=account_email, limits=feedback_service,
+            )
+        if request.form.get("website"):
+            # Hidden trap field: bots fill it in; people never see it.
+            return redirect(url_for("feedback_thanks"))
+        values, errors = feedback_service.validate(request.form, account_email=account_email)
+        page = feedback_page_name(request.form.get("page"))
+        if errors:
+            for error in errors:
+                flash(error, "error")
+            return render_template(
+                "feedback.html", form=request.form, types=feedback_service.TYPES, page=page,
+                account_email=account_email, limits=feedback_service,
+            ), 400
+        now = utc_now()
+        record = {
+            **values, "page": page, "account_id": (account or {}).get("_id"),
+            "user_agent": request.headers.get("User-Agent", "")[:feedback_service.USER_AGENT_MAX] if values["type"] == "bug" else None,
+            "status": "new", "created_at": now, "expires_at": now + timedelta(days=180), "email_sent": False,
+        }
+        record_id = db.feedback.insert_one(record).inserted_id
+        recipient = developer_email()
+        if recipient and feedback_email_allowed(db):
+            sent = send_email(
+                app, recipient=recipient, subject=feedback_service.TYPES[values["type"]]["subject"],
+                text=feedback_service.email_text(values, username=(account or {}).get("username"), page=page, created_at=now),
+                idempotency_key=f"feedback/{record_id}",
+            )
+            db.feedback.update_one({"_id": record_id}, {"$set": {"email_sent": bool(sent)}})
+        return redirect(url_for("feedback_thanks"))
+
+    @app.get("/feedback/thanks")
+    def feedback_thanks():
+        return render_template("feedback_thanks.html")
 
     @app.post("/account/google-calendar-access")
     @login_required

@@ -7,7 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 # MFA endpoints expose only a browser-bound, expiring first-factor challenge.
-PUBLIC = {"index", "privacy", "register", "login", "google_auth", "google_callback", "verify_email", "forgot_password", "reset_password", "mfa_challenge", "mfa_cancel"}
+# Feedback stays public so people can report problems when they can't sign in;
+# it only accepts input (rate limited, CSRF protected) and never shows stored reports.
+PUBLIC = {"index", "privacy", "register", "login", "google_auth", "google_callback", "verify_email", "forgot_password", "reset_password", "mfa_challenge", "mfa_cancel", "feedback", "feedback_thanks"}
 
 
 def inventory(root=ROOT):

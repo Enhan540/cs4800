@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Feedback | Group Planner{% endblock %}
+{% block content %}
+<section class="auth-shell"><div class="card auth-card feedback-card">
+  <p class="eyebrow">Feedback</p>
+  <h1>{{ types[form.type].label if form.type in types else 'Send feedback' }}</h1>
+  <p class="muted auth-intro">This goes straight to the developer. Please don't include passwords or other private details.</p>
+  <form method="post" action="{{ url_for('feedback') }}" class="auth-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="page" value="{{ page or '' }}">
+    <fieldset class="feedback-type"><legend>What is this?</legend>
+      {% for key, item in types.items() %}<label class="permission-row"><input type="radio" name="type" value="{{ key }}"{% if form.type == key %} checked{% endif %} required> <span>{{ item.label }}</span></label>{% endfor %}
+    </fieldset>
+    <label for="feedback-summary">Summary<input id="feedback-summary" name="summary" value="{{ form.summary or '' }}" maxlength="{{ limits.SUMMARY_MAX }}" required autocomplete="off"></label>
+    <label for="feedback-details">Details (optional)<textarea id="feedback-details" name="details" rows="6" maxlength="{{ limits.DETAILS_MAX }}" placeholder="{{ types.bug.details_prompt }}">{{ form.details or '' }}</textarea></label>
+    {% if account_email %}<label class="permission-row"><input type="checkbox" name="use_account_email" value="yes"{% if form.use_account_email == 'yes' %} checked{% endif %}> <span>Reply to my account email</span></label>{% endif %}
+    <label for="feedback-contact">Email for a reply (optional)<input id="feedback-contact" name="contact_email" type="email" value="{{ form.contact_email or '' }}" maxlength="{{ limits.EMAIL_MAX }}" autocomplete="email"></label>
+    <div class="feedback-trap" aria-hidden="true"><label for="feedback-website">Leave this empty<input id="feedback-website" name="website" tabindex="-1" autocomplete="off"></label></div>
+    <button class="button auth-submit" type="submit">Send</button>
+  </form>
+</div></section>
+{% endblock %}

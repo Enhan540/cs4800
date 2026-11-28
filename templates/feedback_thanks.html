@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}Thanks | Group Planner{% endblock %}
+{% block content %}
+<section class="auth-shell"><div class="card auth-card"><p class="eyebrow">Feedback</p><h1>Thanks, it was sent</h1><p class="muted">The developer reads every report. If you left an email, you may get a reply.</p><div class="button-row"><a class="button" href="{{ url_for('dashboard') if current_user.is_authenticated else url_for('index') }}">Back to Group Planner</a></div></div></section>
+{% endblock %}
