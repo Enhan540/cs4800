@@ -1,5 +1,6 @@
 """Request protections shared by local and serverless deployments."""
 
+import ipaddress
 import hashlib
 import os
 import secrets
@@ -43,6 +44,19 @@ def revoke_session(database, account_id):
         database.security_sessions.delete_one({"_id": digest, "account_id": account_id})
 
 
+def client_address(app):
+    """The visitor's address for rate limiting; never stored."""
+    if app.config.get("TRUST_PLATFORM_CLIENT_IP"):
+        candidates = [request.headers.get("X-Real-IP", "")]
+        candidates += [part for part in request.headers.get("X-Forwarded-For", "").split(",")[:1]]
+        for value in candidates:
+            try:
+                return str(ipaddress.ip_address(value.strip()))
+            except ValueError:
+                continue
+    return request.remote_addr or "unknown"
+
+
 def configure_security(app):
     production = bool(os.getenv("VERCEL")) or os.getenv("APP_ENV") == "production"
     app.config.update(
@@ -52,6 +66,9 @@ def configure_security(app):
         MAX_FORM_MEMORY_SIZE=64 * 1024,
         MAX_FORM_PARTS=200,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+        # On Vercel the app only ever sees 127.0.0.1; the visitor's address arrives in
+        # headers that Vercel's edge sets and overwrites, so clients can't spoof them.
+        TRUST_PLATFORM_CLIENT_IP=bool(os.getenv("VERCEL")),
     )
     if production:
         secret = app.config.get("SECRET_KEY", "")
@@ -161,13 +178,13 @@ def init_security(app, database):
         # Test mode skips quotas only; security tests explicitly exercise quotas.
         if not app.testing or app.config.get("SECURITY_TEST_RATE_LIMITS"):
             if request.method == "POST" and request.endpoint == "mfa_challenge":
-                throttle(f"auth-ip:{request.remote_addr}", 120, 900)
+                throttle(f"auth-ip:{client_address(app)}", 120, 900)
             if request.method == "POST" and request.endpoint in {"login", "register", "forgot_password"}:
-                throttle(f"auth-ip:{request.remote_addr}", 120, 900)
+                throttle(f"auth-ip:{client_address(app)}", 120, 900)
                 identity = request.form.get("username") or request.form.get("email") or ""
                 throttle(f"auth-identity:{request.endpoint}:{identity.strip().casefold()}", 20, 900)
             if request.method == "POST" and request.endpoint == "feedback":
-                throttle(f"feedback-ip:{request.remote_addr}", 5, 3600)
+                throttle(f"feedback-ip:{client_address(app)}", 5, 3600)
                 if current_user.is_authenticated:
                     throttle(f"feedback-account:{current_user.id}", 20, 86400)
             if current_user.is_authenticated and request.method == "POST" and request.endpoint == "request_google_calendar_access":
