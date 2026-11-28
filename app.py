@@ -498,6 +498,10 @@ def create_app(database_override=None):
         )
         db.availability.delete_many({"user_id": member_id})
         db.users.delete_one({"_id": member_id, "is_managed": True})
+        for invite in db.group_invites.find({"group_id": group["_id"], "claims_member_id": member_id, "status": "pending"}):
+            db.group_invites.update_one({"_id": invite["_id"], "status": "pending"},
+                                        {"$set": {"status": "revoked", "responded_at": utc_now()}})
+            db.notifications.delete_many({"invite_id": invite["_id"]})
 
     def seed_demo_members(db, group_id, account_id):
         """Create the fake profiles and weekly availability for one demo group."""
@@ -3566,6 +3570,13 @@ def create_app(database_override=None):
             return redirect(url_for("group_detail", group_id=group_id))
         account_id = account["_id"]
         response_state = "available"
+        claims = request.form.get("claims_member_id", "").strip()
+        claimed = None
+        if claims:
+            # Only a member without an account that is still in this group can be taken over.
+            claimed = db.users.find_one({"_id": object_id(claims), "is_managed": True, "managed_group_id": group["_id"]})
+            if not claimed or claimed["_id"] not in group.get("member_ids", []):
+                abort(404)
         if account_id == current_account_id():
             response_state = "member"
             flash("You are already in this group.", "error")
@@ -3577,6 +3588,14 @@ def create_app(database_override=None):
         ):
             response_state = "pending"
             flash("This user has already been invited.", "error")
+        elif claims and db.group_invites.find_one(
+            {"group_id": group["_id"], "claims_member_id": claimed["_id"], "status": "pending"}
+        ):
+            response_state = "available"
+            message = f"{claimed['display_name']} already has a pending invitation. Retract it first."
+            if wants_json_response():
+                return jsonify({"ok": False, "error": message}), 409
+            flash(message, "error")
         else:
             invite = {
                 "group_id": group["_id"],
@@ -3587,6 +3606,8 @@ def create_app(database_override=None):
                 "responded_at": None,
                 "token": None,
             }
+            if claims:
+                invite.update({"claims_member_id": claimed["_id"], "claims_member_name": claimed["display_name"]})
             try:
                 result = db.group_invites.insert_one(invite)
             except DuplicateKeyError:
@@ -3603,12 +3624,51 @@ def create_app(database_override=None):
                     metadata={
                         "group_name": group.get("name", "Group"),
                         "actor_name": current_user.username,
+                        **({"claims_member_name": invite["claims_member_name"]} if claims else {}),
                     },
                 )
-                flash(f"Invitation sent to {account['username']}.", "success")
+                flash(f"Invitation sent to {account['username']}"
+                      + (f" to take over {invite['claims_member_name']}." if claims else "."), "success")
         if wants_json_response():
             return jsonify({"ok": response_state == "pending", "id": str(account_id), "username": account["username"], "state": response_state})
         return redirect(url_for("group_detail", group_id=group_id))
+
+    def take_over_managed_member(db, group, managed_id, member_id):
+        """Give a member without an account's place in this group's plans to a real profile.
+
+        Safe to run twice: once the managed profile is gone, nothing matches.
+        Availability entered for the managed profile is deleted; the person's own
+        account availability is what counts from now on.
+        """
+        managed = db.users.find_one({"_id": managed_id, "is_managed": True, "managed_group_id": group["_id"]})
+        if not managed:
+            return False
+        for plan in db.plans.find({"group_id": group["_id"]}):
+            update = {}
+            invited = plan.get("invited_member_ids")
+            if invited is not None and managed_id in invited:
+                replaced = [member_id if value == managed_id else value for value in invited]
+                update["invited_member_ids"] = list(dict.fromkeys(replaced))
+            available = plan.get("scheduled_available_member_ids") or []
+            if managed_id in available:
+                update["scheduled_available_member_ids"] = list(dict.fromkeys(
+                    member_id if value == managed_id else value for value in available))
+            rsvps = plan.get("rsvps") or {}
+            if str(managed_id) in rsvps:
+                moved = dict(rsvps)
+                response = moved.pop(str(managed_id))
+                moved.setdefault(str(member_id), response)
+                update["rsvps"] = moved
+            if update:
+                db.plans.update_one({"_id": plan["_id"]}, {"$set": update})
+        db.groups.update_one({"_id": group["_id"]}, {"$pull": {"member_ids": managed_id}})
+        db.availability.delete_many({"user_id": managed_id})
+        db.users.delete_one({"_id": managed_id, "is_managed": True})
+        db.group_invites.update_many(
+            {"group_id": group["_id"], "claims_member_id": managed_id, "status": "pending"},
+            {"$set": {"status": "revoked", "responded_at": utc_now()}},
+        )
+        return True
 
     def respond_to_group_invitation(invitation_id, status):
         db = require_database()
@@ -3646,6 +3706,8 @@ def create_app(database_override=None):
                 {"$addToSet": {"member_ids": member["_id"], "account_ids": current_account_id()},
                  "$set": {f"account_roles.{current_account_id()}": "member"}},
             )
+            if invite.get("claims_member_id"):
+                take_over_managed_member(db, group, invite["claims_member_id"], member["_id"])
         notification = db.notifications.find_one({
             "invite_id": invite["_id"],
             "recipient_user_id": current_account_id(),
@@ -3765,6 +3827,7 @@ def create_app(database_override=None):
             "created_at": notification.get("created_at").isoformat() if notification.get("created_at") else "",
             "group_name": metadata.get("group_name", "Group invitation"),
             "actor_name": metadata.get("actor_name", "Someone"),
+            "claims_member_name": metadata.get("claims_member_name", ""),
             "plan_title": metadata.get("plan_title", "Scheduled plan"),
             "scheduled_start": metadata.get("scheduled_start", ""),
             "scheduled_end": metadata.get("scheduled_end", ""),
