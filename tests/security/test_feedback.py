@@ -158,3 +158,10 @@ def test_privacy_policy_describes_feedback(secured):
     app, _db, _ids, _password = secured
     page = app.test_client().get("/privacy").get_data(as_text=True)
     assert "Feedback you send" in page and "180 days" in page and "No IP address is stored" in page
+
+
+def test_details_prompt_matches_the_chosen_type(secured):
+    app, _db, _ids, _password = secured
+    client = app.test_client()
+    assert "What would you like Group Planner to do?" in client.get("/feedback?type=suggestion").get_data(as_text=True)
+    assert "What did you expect, and what happened instead?" in client.get("/feedback?type=bug").get_data(as_text=True)

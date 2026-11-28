@@ -12,7 +12,7 @@
       {% for key, item in types.items() %}<label class="permission-row"><input type="radio" name="type" value="{{ key }}"{% if form.type == key %} checked{% endif %} required> <span>{{ item.label }}</span></label>{% endfor %}
     </fieldset>
     <label for="feedback-summary">Summary<input id="feedback-summary" name="summary" value="{{ form.summary or '' }}" maxlength="{{ limits.SUMMARY_MAX }}" required autocomplete="off"></label>
-    <label for="feedback-details">Details (optional)<textarea id="feedback-details" name="details" rows="6" maxlength="{{ limits.DETAILS_MAX }}" placeholder="{{ types.bug.details_prompt }}">{{ form.details or '' }}</textarea></label>
+    <label for="feedback-details">Details (optional)<textarea id="feedback-details" name="details" rows="6" maxlength="{{ limits.DETAILS_MAX }}" placeholder="{{ types[form.type].details_prompt if form.type in types else types.bug.details_prompt }}">{{ form.details or '' }}</textarea></label>
     {% if account_email %}<label class="permission-row"><input type="checkbox" name="use_account_email" value="yes"{% if form.use_account_email == 'yes' %} checked{% endif %}> <span>Reply to my account email</span></label>{% endif %}
     <label for="feedback-contact">Email for a reply (optional)<input id="feedback-contact" name="contact_email" type="email" value="{{ form.contact_email or '' }}" maxlength="{{ limits.EMAIL_MAX }}" autocomplete="email"></label>
     <div class="feedback-trap" aria-hidden="true"><label for="feedback-website">Leave this empty<input id="feedback-website" name="website" tabindex="-1" autocomplete="off"></label></div>
