@@ -14,6 +14,12 @@ pytestmark = pytest.mark.security
 DEVELOPER = "developer-canary@example.invalid"
 
 
+@pytest.fixture(autouse=True)
+def limited_mode(secured):
+    # Access requests exist only while Google requires approved test users.
+    secured[0].config["GOOGLE_CALENDAR_ACCESS"] = "limited"
+
+
 @pytest.fixture
 def outbox(monkeypatch):
     sent = []
@@ -83,7 +89,8 @@ def test_requests_need_login_and_csrf(secured, outbox):
 
 
 @pytest.mark.parametrize("config", [{"FEEDBACK_EMAIL": "", "SUPPORT_EMAIL": ""},
-                                    {"FEEDBACK_EMAIL": DEVELOPER, "GOOGLE_CALENDAR_ACCESS": "public"}])
+                                    {"FEEDBACK_EMAIL": DEVELOPER, "GOOGLE_CALENDAR_ACCESS": "public"},
+                                    {"FEEDBACK_EMAIL": DEVELOPER, "GOOGLE_CALENDAR_ACCESS": "unverified"}])
 def test_route_is_unavailable_without_a_recipient_or_when_public(secured, outbox, config):
     app, db, _ids, password = secured
     app.config.update(config)

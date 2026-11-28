@@ -168,8 +168,12 @@ def create_app(database_override=None):
         FEEDBACK_EMAIL=os.getenv("FEEDBACK_EMAIL", ""),
         # "limited" while the Google consent screen is in Testing mode (approved
         # test users only, 7-day authorization); "public" once it is verified.
+        # "limited": consent screen in Testing (approved test users, 7-day authorization).
+        # "unverified" (default): published but not verified; Google shows a warning.
+        # "public": verified by Google; no notice.
         GOOGLE_CALENDAR_ACCESS=(
-            "public" if os.getenv("GOOGLE_CALENDAR_ACCESS", "").strip().casefold() == "public" else "limited"
+            value if (value := os.getenv("GOOGLE_CALENDAR_ACCESS", "").strip().casefold()) in {"limited", "public"}
+            else "unverified"
         ),
         APP_TIMEZONE=timezone_name,
         APP_BASE_URL=os.getenv("APP_BASE_URL", ""),
@@ -278,8 +282,10 @@ def create_app(database_override=None):
     @app.context_processor
     def google_calendar_access_context():
         return {
-            "google_calendar_limited": app.config.get("GOOGLE_CALENDAR_ACCESS") != "public",
-            "calendar_request_enabled": bool(developer_email()),
+            "google_calendar_mode": app.config.get("GOOGLE_CALENDAR_ACCESS"),
+            "google_calendar_limited": app.config.get("GOOGLE_CALENDAR_ACCESS") == "limited",
+            # Requests only make sense while Google requires approved test users.
+            "calendar_request_enabled": app.config.get("GOOGLE_CALENDAR_ACCESS") == "limited" and bool(developer_email()),
         }
 
     @app.context_processor
@@ -2248,7 +2254,10 @@ def create_app(database_override=None):
             return redirect(url_for("account"))
         if request.args.get("error"):
             flash("Google Calendar connection was cancelled or denied.", "error")
-            if app.config.get("GOOGLE_CALENDAR_ACCESS") != "public":
+            if app.config.get("GOOGLE_CALENDAR_ACCESS") == "unverified":
+                flash("Google shows a \"Google hasn't verified this app\" warning for Group Planner. "
+                      "To connect, choose Advanced, then Go to Group Planner.", "error")
+            elif app.config.get("GOOGLE_CALENDAR_ACCESS") == "limited":
                 flash("If Google said access is blocked, your Google account may not be approved yet. "
                       "Google Calendar is in limited testing; ask the developer to add your Google email.", "error")
             return redirect(url_for("account"))
@@ -2560,7 +2569,7 @@ def create_app(database_override=None):
         db = require_database()
         account = db.accounts.find_one({"_id": current_account_id()})
         recipient = developer_email()
-        if not account or not recipient or app.config.get("GOOGLE_CALENDAR_ACCESS") == "public":
+        if not account or not recipient or app.config.get("GOOGLE_CALENDAR_ACCESS") != "limited":
             abort(404)
         google_email = normalize_email(request.form.get("google_email"))
         if not valid_email(google_email) or len(google_email) > 254:
