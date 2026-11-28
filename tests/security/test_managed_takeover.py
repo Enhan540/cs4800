@@ -160,3 +160,13 @@ def test_invite_dialog_offers_members_without_accounts(secured):
     assert f'<option value="{managed}">Grandma (no account)</option>' in page
     script = owner.get("/static/js/app.js").get_data(as_text=True)
     assert "claims_member_id: input.closest(\"form\").querySelector" in script
+
+
+def test_names_ending_in_a_period_do_not_double_it(secured):
+    app, db, ids, password = secured
+    managed = add_managed(db, ids["group"], name="Coach L.", owner=ids["owner"])
+    owner, owner_headers = signed_in(app, db, "owner", password)
+    invite(owner, owner_headers, ids["group"], managed)
+    outsider, _headers = signed_in(app, db, "outsider", password)
+    page = outsider.get("/dashboard").get_data(as_text=True)
+    assert "as Coach L.." not in page and "as Coach L." in page
